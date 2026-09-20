@@ -1,0 +1,6 @@
+{
+  "chainId": 8453,
+  "updated": "2026-09-20",
+  "notes": "Empty on purpose: with no registry the indexer runs in discovery-only mode. Add launchpads in the same shape as registry/4663.json.",
+  "launchpads": []
+}

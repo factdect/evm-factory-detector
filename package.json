@@ -1,0 +1,19 @@
+{
+  "name": "factory-detector",
+  "version": "0.1.0",
+  "description": "Which factory did this token come from? Birth indexer + public lookup for EVM chains (first target: Robinhood Chain, 4663).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/main.js",
+    "indexer": "ROLE=indexer node src/main.js",
+    "api": "ROLE=api node src/main.js",
+    "test": "node --test test/*.test.js",
+    "smoke": "node test/live-smoke.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "viem": "^2.21.0"
+  }
+}

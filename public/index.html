@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factory Detector: which factory made this token?</title>
+  <meta name="description" content="Paste a token address and see which launchpad factory created it, how sure that is, and the on-chain evidence. Same data as JSON.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="bar">
+    <a class="mark" href="/">Factory Detector</a>
+    <label class="chain">Chain
+      <select id="chain"></select>
+    </label>
+  </header>
+
+  <main>
+    <h1>Which factory made this token?</h1>
+    <form id="trace" autocomplete="off">
+      <label for="address">Token contract address</label>
+      <div class="row">
+        <input id="address" name="address" spellcheck="false" placeholder="0x…" required pattern="^0x[0-9a-fA-F]{40}$" title="0x followed by 40 hex characters">
+        <button type="submit">Trace factory</button>
+      </div>
+    </form>
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <section id="plate" class="plate" aria-live="polite" hidden>
+      <i class="rivet tl"></i><i class="rivet tr"></i><i class="rivet bl"></i><i class="rivet br"></i>
+      <div id="stamp" class="stamp"></div>
+      <dl id="fields"></dl>
+    </section>
+    <p id="detail" class="detail"></p>
+
+    <section id="evidence" hidden>
+      <h2>Contracts that announced this token at birth</h2>
+      <p class="hint">A factory that creates a token through an internal call still has to emit an event about it. These are the contracts whose events named this token in its first transaction.</p>
+      <div class="scroll"><table id="announcers"></table></div>
+    </section>
+
+    <section id="raw" hidden>
+      <h2>The same answer as JSON</h2>
+      <div class="endpoint"><code id="endpoint"></code></div>
+      <p class="hint"><button type="button" id="copy" class="quiet">Copy URL</button></p>
+      <pre id="json" tabindex="0"></pre>
+    </section>
+
+    <section>
+      <h2>Factories nobody has listed yet</h2>
+      <p class="hint">Contracts that keep announcing newborn tokens and are in no registry. One template across many tokens is the signature of a factory.</p>
+      <div class="scroll"><table id="candidates"></table></div>
+    </section>
+    <section>
+      <h2>Newest tokens</h2>
+      <div class="scroll"><table id="recent"></table></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Evidence, not endorsement. A verified factory says where a token came from. It says nothing about whether the token is safe to buy.</p>
+    <p><a href="/api/v1/chains">API status</a></p>
+  </footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

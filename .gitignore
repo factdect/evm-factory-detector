@@ -1,0 +1,7 @@
+node_modules/
+data/
+scratch/
+.env
+*.db
+*.db-shm
+*.db-wal
