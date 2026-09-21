@@ -406,7 +406,7 @@ export class Lookup {
         id: c.id, name: c.name, slug: c.slug, blockTimeMs: c.blockTimeMs, explorer: c.explorer?.web ?? null,
         launchpadsInRegistry: this.registries.get(c.id).launchpads.size,
         tokensIndexed: n.tokens, tokensAttributed: n.attributed ?? 0,
-        indexer: ix ? { head: ix.head, nextBlock: ix.next, lagBlocks: ix.lag, discovery: ix.discovery, lastError: ix.lastError }
+        indexer: ix ? { head: ix.head, nextBlock: ix.next, lagBlocks: ix.lag, discovery: ix.discovery, lastError: ix.lastError, platformsResolved: ix.platformsResolved ?? 0, agesProbed: ix.agesProbed ?? 0 }
           : cur ? { head: cur.head, nextBlock: cur.next_block, lagBlocks: cur.head ? cur.head - cur.next_block : null, discovery: null, lastError: null } : null,
         explorerLookups: Boolean(process.env.ETHERSCAN_API_KEY || process.env.BLOCKSCOUT_API_KEY),
       };

@@ -396,3 +396,23 @@ test('resolvePlatform: the Doppler integrator decides the launchpad (BURNER vs a
   const l = (await lk.token(4663, old[0][0])).body;
   assert.deepEqual([l.verdict.code, l.launchpad.id, l.factory.platform.status], ['observed-platform', 'long-xyz', 'observed']);
 });
+
+test('Indexer.maintain: background probes run from the caught-up path and back off when there is nothing to do', async () => {
+  const { Indexer } = await import('../src/indexer.js');
+  const store = openDb(':memory:');
+  const chain = { id: 4663, slug: 't', name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, logsChunk: 2000, ageLookbackBlocks: 1000, addrLogsSpan: 1000, explorer: {} };
+  const w = (a) => a.replace('0x', '').padStart(64, '0');
+  const tok = '0x' + '33'.repeat(20);
+  store.saveToken({ chain_id: 4663, address: tok, confidence: 'verified', launchpad_id: 'long-xyz', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', birth_block: 5, birth_tx: '0x1', birth_source: 'registry-event' });
+  for (const t of ['0x' + '44'.repeat(20), '0x' + '55'.repeat(20)]) { store.saveToken({ chain_id: 4663, address: t, confidence: 'discovered', birth_block: 900, birth_tx: '0x1', birth_source: 'x' }); store.q.addRef.run(4663, t, '0x' + 'ee'.repeat(20), '0x' + '09'.repeat(32), 0, 900); }
+  let calls = 0;
+  const rpc = { batch: async (cs) => { calls++; return cs.map(() => ({ result: '0x' + Array(9).fill(w('0x0')).join('') + w('0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4') })); }, call: async () => { calls++; return []; } };
+  const ix = new Indexer({ chain, rpc, registry: reg, store, log: { info() {}, warn() {} } });
+  await ix.maintain(1000);
+  assert.equal(store.q.getToken.get(4663, tok).launchpad_id, 'doppler', 'platform resolved from the normal loop');
+  assert.ok(store.q.getAge.get(4663, '0x' + 'ee'.repeat(20)), 'announcer dated');
+  await ix.maintain(1000); // drains: nothing left, sets the back-off
+  const before = calls;
+  await ix.maintain(1000);
+  assert.equal(calls, before, 'empty backlog: no RPC, no work');
+});

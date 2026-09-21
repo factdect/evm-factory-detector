@@ -39,22 +39,17 @@ export class Indexer {
         const head = Number(await this.rpc.call('eth_blockNumber'));
         const target = head - chain.confirmations;
         let next = store.q.getCursor.get(chain.id)?.next_block ?? chain.startBlock ?? Math.max(0, target - chain.backfillBlocks);
-        if (next > target) {
-          this.#setStatus(head, next);
-          // idle: spend a little budget dating new announcers, then wait for blocks
-          try {
-            const fixed = await probePendingPlatforms({ chain, rpc: this.rpc, registry: this.registry, store, max: 36 });
-            if (!fixed) await probePendingAges({ chain, rpc: this.rpc, store, head, max: 2 });
-          } catch (e) { this.log.warn(`[${chain.slug}] idle probe: ${e.message}`); }
-          await sleep(chain.pollMs);
-          continue;
-        }
+        if (next > target) { this.#setStatus(head, next); await sleep(chain.pollMs); continue; }
         const to = Math.min(next + chain.logsChunk - 1, target);
         const stats = await this.processRange(next, to, head);
         this.receiptMisses = 0;
         store.q.setCursor.run(chain.id, to + 1, head, Math.floor(Date.now() / 1000));
         this.#setStatus(head, to + 1);
         this.status.lastError = null;
+        // Caught up: do a slice of background work, then wait for blocks. On a 100 ms chain there
+        // is always a new block by the time we loop, so "nothing to index" never happens and
+        // cannot be the trigger for this.
+        if (to === target) { await this.maintain(head); await sleep(chain.pollMs); }
         if (stats.known || stats.born) {
           this.log.info(`[${chain.slug}] ${next}-${to} known=${stats.known} born=${stats.born} checked=${stats.checked} lag=${head - to}`);
         }
@@ -64,6 +59,31 @@ export class Indexer {
         this.log.warn(`[${chain.slug}] range failed, retrying in 5s: ${this.status.lastError}`);
         await sleep(5000);
       }
+    }
+  }
+
+  /**
+   * One small slice of background work per caught-up cycle: read the launching app for protocol
+   * launches that lack it, and date one announcer by its first on-chain log. A probe that finds
+   * nothing to do is skipped for a minute so an empty backlog costs no queries.
+   */
+  async maintain(head) {
+    const { chain, store } = this;
+    const now = Date.now();
+    this.idleUntil ??= { platforms: 0, ages: 0 };
+    try {
+      if (now >= this.idleUntil.platforms) {
+        const n = await probePendingPlatforms({ chain, rpc: this.rpc, registry: this.registry, store, max: 24 });
+        if (!n) this.idleUntil.platforms = now + 60_000;
+        this.status.platformsResolved = (this.status.platformsResolved ?? 0) + n;
+      }
+      if (now >= this.idleUntil.ages) {
+        const n = await probePendingAges({ chain, rpc: this.rpc, store, head, max: 1 });
+        if (!n) this.idleUntil.ages = now + 60_000;
+        this.status.agesProbed = (this.status.agesProbed ?? 0) + n;
+      }
+    } catch (e) {
+      this.log.warn(`[${chain.slug}] background probe: ${e.message}`);
     }
   }
 
