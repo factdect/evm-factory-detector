@@ -151,12 +151,15 @@
         el('td', { text: t.bytecodeKind === 'minimal-proxy' ? `${t.codeSize}-byte clone` : `${num(t.codeSize)} bytes` }),
       ), t.address)), 'No births indexed yet. The indexer fills this within a minute of starting.');
       const { candidates } = await api(`/api/v1/candidates/${chainId}`);
-      const fresh = candidates.filter((c) => c.status === 'new' || c.status === 'look-alike');
-      table($('candidates'), ['Contract', 'Tokens announced', 'One template', 'First seen block'], fresh.map((c) => pickable(el('tr', {},
-        el('td', {}, el('span', { class: 'hex', text: short(c.emitter) }), c.status === 'look-alike' ? el('div', {}, tag('Look-alike event', 'bad')) : null),
+      const note = (c) => [
+        c.coEmitters?.length ? `works with ${plural(c.coEmitters.length, 'other contract', 'other contracts')}` : null,
+        c.mechanism?.addresses > 1 ? `same creation event at ${c.mechanism.addresses} addresses: a factory that rotates` : null,
+      ].filter(Boolean).join(', ');
+      table($('candidates'), ['Contract', 'Tokens announced', 'One template', 'First seen'], candidates.slice(0, 40).map((c) => pickable(el('tr', {},
+        el('td', {}, el('span', { class: 'hex', text: short(c.emitter) }), c.status === 'look-alike' ? el('div', {}, tag('Look-alike event', 'bad')) : null, note(c) ? el('div', { class: 'sub', text: note(c) }) : null),
         el('td', { class: 'num', text: num(c.tokensAnnounced) }),
         el('td', { class: 'num', text: c.templatePurity == null ? '–' : `${Math.round(c.templatePurity * 100)}%` }),
-        el('td', { class: 'num', text: num(c.firstSeenBlock) }),
+        el('td', { class: 'num', text: c.seenFromIndexStart ? 'before this index' : ago(c.firstSeenAgoSec) ?? '–' }),
       ), c.sampleTokens[0])), 'Every active factory is already in the registry.');
       return tokens;
     } catch {

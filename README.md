@@ -48,7 +48,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 | --- | --- |
 | `/api/v1/token/:chainId/:address` | Verdict, launchpad, factory (with tokens announced and first-seen age), birth tx, bytecode template, announcers |
 | `/api/v1/recent/:chainId?limit=50` | Newest births |
-| `/api/v1/candidates/:chainId` | Contracts that keep announcing newborn tokens and are in no registry. `status: "new"` are the ones to look at |
+| `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `dex-plumbing` \| …, `sinceHours=24` (first seen within N hours, excluding anything already active when the index started), `min=2`, `limit=100` |
 | `/api/v1/launchpads/:chainId` | Registry with provenance per factory address and indexed counts |
 | `/api/v1/chains` | Configured chains and indexer status (head, lag, discovery on/off) |
 | `/health` | Same, with `ok` |

@@ -87,7 +87,12 @@ export function createServer({ lookup, log = console }) {
           const n = Number.parseInt(url.searchParams.get('limit') ?? '50', 10);
           return send(res, 200, { tokens: lookup.recent(chainId, Number.isFinite(n) ? n : 50) }, { 'cache-control': 'public, max-age=3' });
         }
-        if (resource === 'candidates') return send(res, 200, { candidates: lookup.candidates(chainId) }, { 'cache-control': 'public, max-age=10' });
+        if (resource === 'candidates') {
+          const num = (k) => { const v = Number.parseFloat(url.searchParams.get(k) ?? ''); return Number.isFinite(v) ? v : undefined; };
+          const status = url.searchParams.get('status');
+          const opts = { status: status && /^[a-z:\-0-9]{1,40}$/i.test(status) ? status : undefined, sinceHours: num('sinceHours'), min: num('min'), limit: num('limit') };
+          return send(res, 200, { candidates: lookup.candidates(chainId, opts) }, { 'cache-control': 'public, max-age=10' });
+        }
         if (resource === 'launchpads') return send(res, 200, { launchpads: lookup.launchpads(chainId) }, { 'cache-control': 'public, max-age=60' });
       }
       return send(res, 404, { error: 'not_found', endpoints: ['/api/v1/chains', '/api/v1/token/:chainId/:address', '/api/v1/recent/:chainId', '/api/v1/candidates/:chainId', '/api/v1/launchpads/:chainId', '/health'] });

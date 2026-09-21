@@ -4,6 +4,7 @@ import { loadRegistry, matchKnownEvent, pad32, refsForToken } from '../src/attri
 import { reattributeFromEvidence } from '../src/births.js';
 import { openDb } from '../src/db.js';
 import { findCreation } from '../src/explorer.js';
+import { Lookup } from '../src/lookup.js';
 import { fingerprint } from '../src/fingerprint.js';
 import { getLogsRange, Rpc, RpcError } from '../src/rpc.js';
 
@@ -95,7 +96,9 @@ test('attribution: one signature, two launchpads: the emitter decides (Pons v1 v
   const log = (emitter) => ({ address: emitter, logIndex: '0x1', topics: [T0, pad32(TOKEN), pad32('0x' + '01'.repeat(20)), pad32('0x1f7d7550b1b028f7571e69a784071f0205fd2efa')], data: '0x' + '0'.repeat(64 * 7) });
   assert.equal(matchKnownEvent(reg, log('0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb')).launchpadId, 'pons-v1');
   assert.equal(matchKnownEvent(reg, log('0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb')).launchpadId, 'noxafun');
-  const unknown = matchKnownEvent(reg, log('0xf4fc0cd27fc8ecf17e55ee4c3f7201897df3eb75'));
+  const observed = matchKnownEvent(reg, log('0xf4fc0cd27fc8ecf17e55ee4c3f7201897df3eb75'));
+  assert.deepEqual([observed.launchpadId, observed.confidence], ['pons-v1', 'observed-emitter'], 'found on-chain by us, not published: never "verified"');
+  const unknown = matchKnownEvent(reg, log('0x' + 'c0'.repeat(20)));
   assert.equal(unknown.launchpadId, null);
   assert.deepEqual(unknown.family.sort(), ['noxafun', 'pons-v1']);
   // the chain's shared UniswapV3Factory must not be on anyone's allowlist
@@ -256,4 +259,37 @@ test('reattributeFromEvidence: promoting a factory into the registry labels its 
   assert.equal(store.q.getToken.get(4663, '0xbb').launchpad_id, null, 'look-alike emitter stays unattributed');
   assert.equal(store.q.getToken.get(4663, '0xcc').launchpad_id, null, 'a different event from the real factory is not a creation event');
   assert.equal(reattributeFromEvidence(store, reg, 4663), 0, 'idempotent');
+});
+
+test('candidates: co-firing contracts are one system, a rotating factory is one mechanism, plumbing and published contracts stay out', () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 500_001, 500_000, 0);
+  const A = '0x' + 'a1'.repeat(20), A2 = '0x' + 'a2'.repeat(20), R1 = '0x' + 'b1'.repeat(20), R2 = '0x' + 'b2'.repeat(20);
+  const POOLMGR = '0x' + 'dd'.repeat(20), PONS2 = '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e', SPOOF = '0x' + 'ee'.repeat(20);
+  const INIT = '0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438'; // v4 Initialize
+  const PONS2_TOPIC = [...reg.byTopic0.entries()].find(([, sp]) => sp.some((x) => x.launchpadId === 'pons-v2'))[0];
+  let n = 0;
+  const birth = (block, fp, refs, launchpad = null) => {
+    const t = '0x' + (++n).toString(16).padStart(40, '0');
+    store.saveToken({ chain_id: 4663, address: t, confidence: launchpad ? 'verified' : 'discovered', launchpad_id: launchpad, birth_block: block, birth_tx: '0x1', birth_source: 'x', fp_key: fp });
+    refs.forEach(([em, topic], i) => store.q.addRef.run(4663, t, em, topic, i, block));
+  };
+  for (let i = 0; i < 12; i++) birth(100_000 + i, 'skel:A', [[A, '0x' + '01'.repeat(32)], [A2, '0x' + '02'.repeat(32)], [POOLMGR, INIT]]);   // old system: 2 contracts, same births
+  for (let i = 0; i < 5; i++) birth(480_000 + i, 'skel:R', [[R1, '0x' + '03'.repeat(32)]]);                                                  // rotating factory, address 1 (~33 min ago)
+  for (let i = 0; i < 5; i++) birth(490_000 + i, 'skel:R', [[R2, '0x' + '03'.repeat(32)], [POOLMGR, INIT]]);                                  // rotating factory, address 2
+  for (let i = 0; i < 6; i++) birth(495_000 + i, 'skel:P', [[PONS2, PONS2_TOPIC], [POOLMGR, INIT]], 'pons-v2');                               // published factory
+  birth(499_000, 'skel:S', [[SPOOF, PONS2_TOPIC]]);                                                                                          // one look-alike event
+
+  const all = lk.candidates(4663);
+  assert.deepEqual(all.map((c) => c.status), ['look-alike', 'new', 'new', 'new'], 'look-alikes first, even with a single token');
+  const sysA = all.find((c) => c.emitter === A || c.emitter === A2);
+  assert.equal(sysA.coEmitters.length, 1, 'A and A2 announce the same tokens: one system');
+  assert.equal(sysA.seenFromIndexStart, true, 'active since the first indexed hour: real age unknown');
+  const r1 = all.find((c) => c.emitter === R1);
+  assert.deepEqual([r1.mechanism.addresses, r1.mechanism.otherAddresses], [2, [R2]], 'same creation event at two addresses');
+  assert.ok(!all.some((c) => c.emitter === POOLMGR || c.emitter === PONS2), 'plumbing and published factories are not candidates');
+  assert.equal(lk.candidates(4663, { status: 'all' }).find((c) => c.emitter === POOLMGR).status, 'dex-plumbing');
+  assert.deepEqual(lk.candidates(4663, { status: 'new', sinceHours: 1 }).map((c) => c.emitter).sort(), [R1, R2].sort(), 'only what first appeared in the last hour');
 });

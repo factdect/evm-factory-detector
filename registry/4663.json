@@ -1,6 +1,6 @@
 {
   "chainId": 4663,
-  "updated": "2026-09-20",
+  "updated": "2026-09-21",
   "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk.",
   "launchpads": [
     {
@@ -168,16 +168,22 @@
           },
           "emitters": [
             {
+              "address": "0xf4fc0cd27fc8ecf17e55ee4c3f7201897df3eb75",
+              "label": "open v1 factory (EIP-1967 proxy)",
+              "status": "observed",
+              "source": "Not published by Pons. On-chain 2026-09-21: launchEnabled()==true here, ==false on both Mobula-documented v1 factories; answers the Pons getLaunchedToken ABI; ~10-60 launches/day. Third-party corroboration: github.com/pjcoal/store-stocks reports finding it in ponsfamily.com's production bundle with verified PonsLaunchFactory source. Owner differs from the documented factories, so it stays 'observed' until Pons confirms."
+            },
+            {
               "address": "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb",
               "label": "active factory",
               "status": "confirmed",
-              "source": "docs.mobula.io/almanac/robinhood-launchpads/pons"
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/pons (launchEnabled()==false on-chain 2026-09-21: whitelist-gated, emits nothing)"
             },
             {
               "address": "0x0c37a24f5d23a486fa692d1500881d698b1f77a4",
               "label": "legacy factory",
               "status": "confirmed",
-              "source": "docs.mobula.io/almanac/robinhood-launchpads/pons"
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/pons (launchEnabled()==false on-chain 2026-09-21: whitelist-gated, emits nothing)"
             }
           ]
         }

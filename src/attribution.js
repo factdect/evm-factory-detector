@@ -30,6 +30,13 @@ const INFRA_SIGNATURES = {
   'Transfer(address,address,uint256)': 'ERC-20/721 transfer',
   'Approval(address,address,uint256)': 'ERC-20 approval',
   'OwnershipTransferred(address,address)': 'Ownable',
+  'Swap(address,uint256,uint256,uint256,uint256,address)': 'Uniswap v2-style pool',
+  'Sync(uint112,uint112)': 'Uniswap v2-style pool',
+  'Mint(address,uint256,uint256)': 'Uniswap v2-style pool',
+  'Swap(address,address,int256,int256,uint160,uint128,int24)': 'Uniswap v3-style pool',
+  'Mint(address,address,int24,int24,uint128,uint256,uint256)': 'Uniswap v3-style pool',
+  'Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)': 'Uniswap v4 PoolManager',
+  'ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)': 'Uniswap v4 PoolManager',
   'Approval(address,address,address,uint160,uint48)': 'Permit2 allowance',
   'Permit(address,address,address,uint160,uint48,uint48)': 'Permit2 allowance',
 };

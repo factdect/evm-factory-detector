@@ -43,7 +43,15 @@ export class Lookup {
           COUNT(DISTINCT t.launchpad_id) AS known_launchpads, GROUP_CONCAT(DISTINCT t.launchpad_id) AS launchpads,
           COUNT(DISTINCT r.topic0) AS event_types, MIN(r.block) AS first_block, MAX(r.block) AS last_block
         FROM birth_refs r JOIN tokens t ON t.chain_id = r.chain_id AND t.address = r.token
-        WHERE r.chain_id = ? AND r.block >= ? AND t.is_lp = 0 GROUP BY r.emitter ORDER BY births DESC LIMIT 200`),
+        WHERE r.chain_id = ? AND r.block >= ? AND t.is_lp = 0 GROUP BY r.emitter HAVING births >= 2 ORDER BY births DESC LIMIT 1500`),
+      oneEmitter: db.prepare(`SELECT r.emitter, COUNT(DISTINCT r.token) AS births,
+          COUNT(DISTINCT CASE WHEN t.launchpad_id IS NOT NULL THEN r.token END) AS known_births,
+          COUNT(DISTINCT t.launchpad_id) AS known_launchpads, GROUP_CONCAT(DISTINCT t.launchpad_id) AS launchpads,
+          COUNT(DISTINCT r.topic0) AS event_types, MIN(r.block) AS first_block, MAX(r.block) AS last_block
+        FROM birth_refs r JOIN tokens t ON t.chain_id = r.chain_id AND t.address = r.token
+        WHERE r.chain_id = ? AND r.block >= ? AND r.emitter = ?`),
+      emitterTokens: db.prepare('SELECT DISTINCT token FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ?'),
+      indexStart: db.prepare('SELECT MIN(block) AS b FROM birth_refs WHERE chain_id = ?'),
       emitterTopics: db.prepare(`SELECT topic0, COUNT(*) AS n FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ? GROUP BY topic0 ORDER BY n DESC LIMIT 5`),
       sampleTokens: db.prepare(`SELECT token FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ? GROUP BY token ORDER BY MAX(block) DESC LIMIT 3`),
     };
@@ -226,35 +234,108 @@ export class Lookup {
     }));
   }
 
-  /** The detector: contracts that keep announcing newborn tokens but are not in the registry. */
-  candidates(chainId) {
-    const chain = this.chain(chainId);
-    if (!chain) return null;
-    const hit = this.listCache.get(`cand:${chain.id}`);
+  /**
+   * The detector: contracts that keep announcing newborn tokens but are in no registry.
+   * Emitters that fire in the same birth transactions are one *system*; systems that share
+   * a creation event are one *mechanism* (a factory that rotates its address shows up as
+   * one mechanism with many systems).
+   */
+  #systems(chain) {
+    const hit = this.listCache.get(`sys:${chain.id}`);
     if (hit) return hit;
-    const out = [];
+    const reg = this.registries.get(chain.id);
     const since = this.#since(chain.id);
-    for (const e of this.sql.emitters.all(chain.id, since)) {
+    const head = this.#head(chain.id);
+    const indexStart = this.sql.indexStart.get(chain.id)?.b ?? null;
+    const hourBlocks = Math.round(3_600_000 / chain.blockTimeMs);
+
+    // look-alikes get their own query so busy chains can never push them below a LIMIT
+    const lookAlike = new Set();
+    if (reg.topic0s.length) {
+      const q = this.store.db.prepare(`SELECT DISTINCT emitter FROM birth_refs WHERE chain_id = ? AND block >= ? AND topic0 IN (${reg.topic0s.map(() => '?').join(',')})`);
+      for (const r of q.all(chain.id, since, ...reg.topic0s)) if (!reg.factoryOf.has(r.emitter) && !reg.companionOf.has(r.emitter)) lookAlike.add(r.emitter);
+    }
+    const rows = this.sql.emitters.all(chain.id, since);
+    const seen = new Set(rows.map((r) => r.emitter));
+    for (const e of lookAlike) if (!seen.has(e)) rows.push(this.sql.oneEmitter.get(chain.id, since, e));
+
+    const members = [];
+    for (const e of rows) {
+      if (!e || reg.factoryOf.has(e.emitter) || reg.companionOf.has(e.emitter)) continue; // already published
       const topics = this.sql.emitterTopics.all(chain.id, e.emitter, since);
       const classes = topics.map((t) => this.#classify(chain.id, e.emitter, t.topic0));
-      if (classes.some((c) => c.role === 'registry' || c.role === 'companion')) continue; // already published
       const info = this.#emitterInfo(chain.id, e.emitter);
       let status = 'new';
-      if (classes.every((c) => c.role === 'infra')) status = 'dex-plumbing';
+      if (classes[0]?.role === 'infra') status = 'dex-plumbing';                 // dominant event is DEX plumbing
+      else if (lookAlike.has(e.emitter)) status = 'look-alike';
       else if (e.known_launchpads >= 2) status = 'shared-plumbing';
+      else if (info.purity !== null && info.purity < 0.6 && e.births >= 20) status = 'shared-plumbing'; // many templates = not a factory
       else if (e.known_launchpads === 1 && e.known_births / e.births >= 0.9) status = `companion-of:${e.launchpads}`;
-      else if (classes.some((c) => c.role === 'look-alike')) status = 'look-alike';
-      if (e.births < 2 && status !== 'look-alike') continue; // per-launch helper contracts and one-off deployers
-      out.push({
-        emitter: e.emitter, status, tokensAnnounced: e.births, alreadyAttributed: e.known_births, templatePurity: info.purity,
-        eventTypes: e.event_types, topEvents: topics.map((t, i) => ({ topic0: t.topic0, count: t.n, label: classes[i].label })),
-        firstSeenBlock: e.first_block, lastSeenBlock: e.last_block,
-        sampleTokens: this.sql.sampleTokens.all(chain.id, e.emitter, since).map((r) => r.token),
-      });
+      members.push({ e, topics, classes, info, status, tokens: null });
     }
-    const order = { new: 0, 'look-alike': 1 };
-    out.sort((a, b) => (order[a.status] ?? 2) - (order[b.status] ?? 2) || b.tokensAnnounced - a.tokensAnnounced);
-    return this.listCache.set(`cand:${chain.id}`, out.slice(0, 60));
+
+    // group emitters that announce the same tokens (Jaccard >= 0.9) into one system
+    const parent = members.map((_, i) => i);
+    const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    const small = members.map((m, i) => ({ m, i })).filter(({ m }) => m.e.births <= 5000 && (m.status === 'new' || m.status === 'look-alike'));
+    for (const x of small) x.m.tokens = new Set(this.sql.emitterTokens.all(chain.id, x.m.e.emitter, since).map((r) => r.token));
+    small.sort((x, y) => x.m.tokens.size - y.m.tokens.size);
+    for (let i = 0; i < small.length; i++) {
+      for (let j = i + 1; j < small.length && small[j].m.tokens.size <= small[i].m.tokens.size / 0.9; j++) {
+        const A = small[i].m.tokens, B = small[j].m.tokens;
+        let inter = 0; for (const t of A) if (B.has(t)) inter++;
+        if (inter / (A.size + B.size - inter) >= 0.9) parent[find(small[i].i)] = find(small[j].i);
+      }
+    }
+    const groups = new Map();
+    members.forEach((m, i) => { const r = find(i); (groups.get(r) ?? groups.set(r, []).get(r)).push(m); });
+
+    const ago = (block) => (head && block != null ? Math.max(0, Math.round(((head - block) * chain.blockTimeMs) / 1000)) : null);
+    const systems = [...groups.values()].map((g) => {
+      g.sort((x, y) => y.e.births - x.e.births || (x.e.emitter < y.e.emitter ? -1 : 1));
+      const p = g[0];
+      const first = Math.min(...g.map((m) => m.info.firstBlock ?? m.e.first_block));
+      const last = Math.max(...g.map((m) => m.e.last_block));
+      const own = p.topics.map((t, i) => ({ t, c: p.classes[i] })).find((x) => x.c.role !== 'infra');
+      return {
+        emitter: p.e.emitter,
+        coEmitters: g.slice(1).map((m) => ({ address: m.e.emitter, topEvent: m.topics[0]?.topic0 ?? null })),
+        status: g.some((m) => m.status === 'look-alike') ? 'look-alike' : p.status,
+        tokensAnnounced: p.e.births, alreadyAttributed: p.e.known_births, templatePurity: p.info.purity,
+        eventTypes: p.e.event_types, topEvents: p.topics.map((t, i) => ({ topic0: t.topic0, count: t.n, label: p.classes[i].label })),
+        firstSeenBlock: first, lastSeenBlock: last, firstSeenAgoSec: ago(first), lastSeenAgoSec: ago(last),
+        // true = it was already active when this index started, so its real age is unknown
+        seenFromIndexStart: indexStart !== null && first <= indexStart + hourBlocks,
+        mechanismTopic: own?.t.topic0 ?? null,
+        sampleTokens: this.sql.sampleTokens.all(chain.id, p.e.emitter, since).map((r) => r.token),
+      };
+    });
+    // a factory that rotates addresses: several systems, one creation event
+    const byMech = new Map();
+    for (const s of systems) if (s.mechanismTopic && (s.status === 'new' || s.status === 'look-alike')) (byMech.get(s.mechanismTopic) ?? byMech.set(s.mechanismTopic, []).get(s.mechanismTopic)).push(s.emitter);
+    for (const s of systems) {
+      const sib = byMech.get(s.mechanismTopic) ?? [s.emitter];
+      s.mechanism = { topic0: s.mechanismTopic, addresses: sib.length, otherAddresses: sib.filter((a) => a !== s.emitter).slice(0, 20) };
+      delete s.mechanismTopic;
+    }
+    return this.listCache.set(`sys:${chain.id}`, systems);
+  }
+
+  /** opts: { status: 'unlisted' (new + look-alike, default) | 'all' | exact status, sinceHours, min, limit } */
+  candidates(chainId, opts = {}) {
+    const chain = this.chain(chainId);
+    if (!chain) return null;
+    const status = opts.status ?? 'unlisted';
+    const min = Math.max(1, Number.isFinite(opts.min) ? opts.min : 2);
+    const limit = Math.min(500, Math.max(1, Number.isFinite(opts.limit) ? opts.limit : 100));
+    const maxAge = Number.isFinite(opts.sinceHours) ? opts.sinceHours * 3600 : null;
+    const order = { 'look-alike': 0, new: 1 };
+    return this.#systems(chain)
+      .filter((s) => (status === 'all' ? true : status === 'unlisted' ? s.status === 'new' || s.status === 'look-alike' : s.status === status))
+      .filter((s) => s.tokensAnnounced >= min || s.status === 'look-alike')
+      .filter((s) => maxAge === null || (s.firstSeenAgoSec !== null && s.firstSeenAgoSec <= maxAge && !s.seenFromIndexStart))
+      .sort((x, y) => (order[x.status] ?? 2) - (order[y.status] ?? 2) || y.tokensAnnounced - x.tokensAnnounced)
+      .slice(0, limit);
   }
 
   launchpads(chainId) {
@@ -281,7 +362,7 @@ export class Lookup {
         tokensIndexed: n.tokens, tokensAttributed: n.attributed ?? 0,
         indexer: ix ? { head: ix.head, nextBlock: ix.next, lagBlocks: ix.lag, discovery: ix.discovery, lastError: ix.lastError }
           : cur ? { head: cur.head, nextBlock: cur.next_block, lagBlocks: cur.head ? cur.head - cur.next_block : null, discovery: null, lastError: null } : null,
-        explorerLookups: Boolean(process.env.BLOCKSCOUT_API_KEY),
+        explorerLookups: Boolean(process.env.ETHERSCAN_API_KEY || process.env.BLOCKSCOUT_API_KEY),
       };
     });
   }
