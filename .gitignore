@@ -1,6 +1,7 @@
 node_modules/
 data/
 scratch/
+.DS_Store
 .env
 *.db
 *.db-shm

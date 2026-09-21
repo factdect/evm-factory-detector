@@ -38,7 +38,7 @@ node test/live-smoke.js 4663 2000   # live: index the last 2000 blocks into memo
 node test/live-smoke.js 8453 40     # same code on Base, discovery-only
 ```
 
-Needs Node 20+. Dependencies: `viem` (ABI + keccak) and `better-sqlite3`. No build step.
+Needs Node 22+ (any current version; better-sqlite3 v13 ships N-API prebuilds, so nothing compiles at install). Dependencies: `viem` (ABI + keccak) and `better-sqlite3`. No build step.
 
 ## API
 
@@ -55,7 +55,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 
 Page: `/` and shareable `/t/:chainId/:address`.
 
-Indexed tokens cost no RPC call. Tokens outside the index cost one batched RPC request (plus one explorer call when `BLOCKSCOUT_API_KEY` is set), are rate limited per client, and are not written to the database unless the explorer returned a real birth transaction.
+Indexed tokens cost no RPC call. Tokens outside the index cost one batched RPC request (plus one explorer call when `ETHERSCAN_API_KEY` or `BLOCKSCOUT_API_KEY` is set; Etherscan V2 is tried first), are rate limited per client, and are not written to the database unless the explorer returned a real birth transaction.
 
 ## Deploy on Railway
 
@@ -63,7 +63,7 @@ One service, one volume.
 
 1. New service from the repo. Start command is `npm start`.
 2. Add a volume mounted at `/data`. Set `DB_PATH=/data/factory.db`.
-3. Set `CHAINS=4663`. Optional: `BLOCKSCOUT_API_KEY`.
+3. Set `CHAINS=4663`. Optional: `ETHERSCAN_API_KEY` or `BLOCKSCOUT_API_KEY` for on-demand lookups of tokens born before the index.
 4. Health check path: `/health`.
 
 Keep `ROLE=all`. The indexer and the API share one paced RPC client, so public lookups can never push the indexer into HTTP 429. Splitting into two services only works if both can open the same SQLite file, which Railway volumes do not allow.
@@ -112,7 +112,7 @@ Not supported: chains that are not bytecode-equivalent (zkSync Era breaks finger
 - **Births outside the state window** (downtime longer than a few minutes, deep backfill) are found only through registry events, unless you point `RPC_<id>` at an archive node and set `STATE_WINDOW_<id>=0`.
 - **Tokens that do not mint in their creation transaction** are missed by discovery.
 - **Vyper** keeps immutables after the code, so Vyper templates do not collapse into one skeleton.
-- **The Blockscout adapter** (`src/explorer.js`) is written against the documented `getcontractcreation` response and unit-tested with a stub. It has not been run against the live API. It fails soft: on any surprise the lookup falls back to bytecode evidence.
+- **The explorer adapters** (`src/explorer.js`: Etherscan V2, Blockscout PRO) are written against the documented `getcontractcreation` response and unit-tested with stubs. Neither has been run against the live APIs. They fail soft: on any surprise the lookup falls back to bytecode evidence.
 - **Verified means provenance, not safety.** A token from a verified factory can still be a bad buy.
 - **Growth:** `birth_refs` grows by a few rows per birth. Rows older than the stats window can be deleted without affecting attribution.
 
@@ -126,7 +126,7 @@ src/attribution.js  registry loader, event matching, "who announced this token" 
 src/births.js       records one birth (shared by indexer and on-demand lookups)
 src/indexer.js      the loop
 src/lookup.js       index rows -> public JSON, candidates (the detector)
-src/explorer.js     optional Blockscout PRO adapter
+src/explorer.js     optional explorer adapters (Etherscan V2, Blockscout PRO)
 src/server.js       HTTP API + static page, strict CSP
 public/             the lookup page (no framework, no inline script)
 registry/           launchpads per chain, every address with its source

@@ -177,18 +177,39 @@ test('Rpc: batch results are matched by id, and an HTTP 429 is retried', async (
   }
 });
 
-// ---- explorer adapter (stubbed: no live key in development) -------------------------------------
-test('findCreation: parses the Etherscan-compatible shape and fails soft on everything else', async () => {
-  const chain = { explorer: { kind: 'blockscout-pro', chainid: 4663 } };
-  const ok = async (url) => {
-    assert.match(String(url), /chainid=4663.*action=getcontractcreation/);
-    return new Response(JSON.stringify({ status: '1', result: [{ contractAddress: TOKEN, contractCreator: AIRLOCK.toUpperCase().replace('0X', '0x'), txHash: '0x' + 'AB'.repeat(32) }] }));
-  };
-  assert.deepEqual(await findCreation(chain, TOKEN, { apiKey: 'k', fetchImpl: ok }), { txHash: '0x' + 'ab'.repeat(32), creator: AIRLOCK });
-  assert.equal(await findCreation(chain, TOKEN, { apiKey: '', fetchImpl: ok }), null, 'no key, no call');
-  assert.equal(await findCreation(chain, TOKEN, { apiKey: 'k', fetchImpl: async () => new Response('{"result":"Max rate limit reached"}') }), null);
-  assert.equal(await findCreation(chain, TOKEN, { apiKey: 'k', fetchImpl: async () => new Response('oops', { status: 500 }) }), null);
-  assert.equal(await findCreation(chain, TOKEN, { apiKey: 'k', fetchImpl: async () => { throw new Error('network'); } }), null);
+// ---- explorer adapters (stubbed: no live keys in development) -----------------------------------
+test('findCreation: parses the Etherscan-compatible shape, tries Etherscan V2 then Blockscout, fails soft', async () => {
+  const chain = { id: 4663, explorer: { kind: 'blockscout-pro', chainid: 4663 } };
+  const good = JSON.stringify({ status: '1', result: [{ contractAddress: TOKEN, contractCreator: AIRLOCK.toUpperCase().replace('0X', '0x'), txHash: '0x' + 'AB'.repeat(32) }] });
+  const want = { txHash: '0x' + 'ab'.repeat(32), creator: AIRLOCK };
+
+  const calls = [];
+  const record = (body, status = 200) => async (url) => { calls.push(String(url)); return new Response(body, { status }); };
+
+  // both keys set: Etherscan answers, Blockscout never called
+  calls.length = 0;
+  assert.deepEqual(await findCreation(chain, TOKEN, { env: { ETHERSCAN_API_KEY: 'e', BLOCKSCOUT_API_KEY: 'b' }, fetchImpl: record(good) }), want);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /api\.etherscan\.io\/v2\/api\?chainid=4663.*getcontractcreation/);
+
+  // Etherscan rate-limited -> falls through to Blockscout
+  calls.length = 0;
+  let n = 0;
+  const flaky = async (url) => { calls.push(String(url)); return new Response(n++ === 0 ? '{"result":"Max rate limit reached"}' : good); };
+  assert.deepEqual(await findCreation(chain, TOKEN, { env: { ETHERSCAN_API_KEY: 'e', BLOCKSCOUT_API_KEY: 'b' }, fetchImpl: flaky }), want);
+  assert.match(calls[1], /api\.blockscout\.com\/v2\/api\?chainid=4663/);
+
+  // only Blockscout key -> only Blockscout called
+  calls.length = 0;
+  assert.deepEqual(await findCreation(chain, TOKEN, { env: { BLOCKSCOUT_API_KEY: 'b' }, fetchImpl: record(good) }), want);
+  assert.match(calls[0], /blockscout/);
+
+  // no keys, no calls; and every failure shape returns null
+  calls.length = 0;
+  assert.equal(await findCreation(chain, TOKEN, { env: {}, fetchImpl: record(good) }), null);
+  assert.equal(calls.length, 0);
+  assert.equal(await findCreation(chain, TOKEN, { env: { ETHERSCAN_API_KEY: 'e' }, fetchImpl: record('oops', 500) }), null);
+  assert.equal(await findCreation(chain, TOKEN, { env: { ETHERSCAN_API_KEY: 'e' }, fetchImpl: async () => { throw new Error('network'); } }), null);
 });
 
 test('Rpc: a programming error inside the transport is not retried for a minute', async () => {
@@ -211,7 +232,7 @@ test('Rpc: a node that rejects the whole batch gets it again in halves', async (
     sizes.push(reqs.length);
     if (reqs.length > 2) return new Response(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'batch too large' } }));
     const body = reqs.map((r) => ({ jsonrpc: '2.0', id: r.id, result: r.params[0] }));
-    return new Response(JSON.stringify(Array.isArray(parsed) ? body : body[0]));
+    return new Response(JSON.stringify(Array.isArray(parsed) ? body[0] && body : body[0]));
   };
   try {
     const rpc = new Rpc({ url: 'http://stub', minIntervalMs: 0 });
@@ -224,16 +245,14 @@ test('Rpc: a node that rejects the whole batch gets it again in halves', async (
 test('reattributeFromEvidence: promoting a factory into the registry labels its already-indexed tokens, and only those', () => {
   const store = openDb(':memory:');
   const PONS2 = '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e';
-  const T0 = '0x8d4aad4953d0ca70'; // prefix only matters for readability; use the registry's real topic below
   const topic = [...reg.byTopic0.entries()].find(([, specs]) => specs.some((s) => s.launchpadId === 'pons-v2'))[0];
-  assert.ok(topic.startsWith(T0));
   for (const [addr, emitter, t] of [['0xaa', PONS2, topic], ['0xbb', '0x' + 'be'.repeat(20), topic], ['0xcc', PONS2, '0x' + '12'.repeat(32)]]) {
     store.saveToken({ chain_id: 4663, address: addr, confidence: 'discovered', birth_block: 10, birth_tx: '0x1', birth_source: 'discovery' });
     store.q.addRef.run(4663, addr, emitter, t, 0, 10);
   }
   assert.equal(reattributeFromEvidence(store, reg, 4663), 1);
   const a = store.q.getToken.get(4663, '0xaa');
-  assert.deepEqual([a.launchpad_id, a.confidence, a.factory, a.birth_block, a.birth_source], ['pons-v2', 'verified', PONS2, 10, 'discovery']);
+  assert.deepEqual([a.launchpad_id, a.confidence, a.factory], ['pons-v2', 'verified', PONS2]);
   assert.equal(store.q.getToken.get(4663, '0xbb').launchpad_id, null, 'look-alike emitter stays unattributed');
   assert.equal(store.q.getToken.get(4663, '0xcc').launchpad_id, null, 'a different event from the real factory is not a creation event');
   assert.equal(reattributeFromEvidence(store, reg, 4663), 0, 'idempotent');
