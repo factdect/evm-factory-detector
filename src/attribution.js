@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { toEventSelector } from 'viem';
+import { decodeFunctionResult, encodeFunctionData, parseAbiItem, toEventSelector } from 'viem';
 
 export const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 export const ZERO_TOPIC = '0x' + '0'.repeat(64);
@@ -71,7 +71,11 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
       const topic0 = toEventSelector(ev.signature);
       const emitters = new Map((ev.emitters ?? []).map((e) => [lc(e.address), { label: e.label ?? null, status: e.status ?? 'confirmed', source: e.source ?? null }]));
       for (const [addr, e] of emitters) factoryOf.set(addr, { launchpadId: lp.id, label: e.label });
-      const spec = { launchpadId: lp.id, signature: ev.signature, topic0, token: ev.token, fields: ev.fields ?? {}, emitters };
+      const platform = ev.platform ? {
+        abi: [parseAbiItem(ev.platform.call)], field: ev.platform.field, name: ev.platform.name ?? 'platform',
+        known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), v])),
+      } : null;
+      const spec = { launchpadId: lp.id, signature: ev.signature, topic0, token: ev.token, fields: ev.fields ?? {}, emitters, platform };
       if (!byTopic0.has(topic0)) byTopic0.set(topic0, []);
       byTopic0.get(topic0).push(spec);
     }
@@ -116,6 +120,7 @@ export function matchKnownEvent(registry, log) {
     signature: spec.signature,
     fields,
     family: [...new Set(specs.map((s) => s.launchpadId))], // launchpads that use this event signature
+    platform: hit?.platform ?? null, // protocol emitters: the launching app is resolved by a call
   };
 }
 
@@ -142,4 +147,29 @@ export function refsForToken(logs, token) {
     if (!seen.has(k)) seen.set(k, { emitter, topic0, logIndex: Number(log.logIndex) });
   }
   return [...seen.values()];
+}
+
+/**
+ * Permissionless protocols (Doppler) emit one creation event for every app built on them.
+ * The app is stored per asset (Doppler: getAssetData(asset).integrator). Given the raw call
+ * result, return { platform, launchpadId, confidence, label } for the token.
+ *   known integrator  -> that launchpad, 'verified' if confirmed, 'observed-emitter' if observed
+ *   unknown           -> the protocol itself, 'verified' (it IS a protocol launch, app unlisted)
+ */
+export function resolvePlatform(match, rawResult) {
+  const p = match.platform;
+  let addr = null;
+  try {
+    const out = decodeFunctionResult({ abi: p.abi, functionName: p.abi[0].name, data: rawResult });
+    const v = Array.isArray(out) ? out[p.field] : out;
+    if (typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v)) addr = v.toLowerCase();
+  } catch { /* unreadable: stays at protocol level */ }
+  const k = addr ? p.known.get(addr) : null;
+  if (k) return { platform: addr, launchpadId: k.launchpad, confidence: k.status === 'confirmed' ? 'verified' : 'observed-emitter', label: k.label ?? null };
+  return { platform: addr ?? 'unreadable', launchpadId: match.launchpadId, confidence: 'verified', label: null };
+}
+
+export function platformCall(match, token) {
+  const p = match.platform;
+  return { method: 'eth_call', params: [{ to: match.factory, data: encodeFunctionData({ abi: p.abi, functionName: p.abi[0].name, args: [token] }) }, 'latest'] };
 }

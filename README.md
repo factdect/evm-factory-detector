@@ -13,6 +13,10 @@ Trading terminals label launchpad tokens from a hand-maintained allowlist of fac
 
 **Bytecode fingerprint.** Minimal clones (EIP-1167, 0age 44-byte, Solady, clones with immutable args) key on their hardcoded implementation and are reported as not upgradeable. Everything else keys on the opcode skeleton (runtime code with PUSH operands zeroed), so tokens that differ only in immutables collapse into one template. EIP-1967 proxies are flagged upgradeable.
 
+### Protocols vs launchpads
+
+Some creation events belong to a permissionless *protocol*, not an app. Doppler's Airlock (canonical on Robinhood Chain, per docs.doppler.lol) emits the same `Create` for Long.xyz and for anyone else who calls it. The launching app is stored per asset (`getAssetData(asset).integrator`), so the registry lets an event carry a `platform` resolver: the indexer reads the integrator at record time, maps known integrators to their launchpad, and labels the rest `protocol-verified` ("Doppler, unlisted app"). Rows indexed before a resolver existed are re-checked in idle time. On 2026-09-21 about a third of Doppler launches on Robinhood Chain came from integrators other than Long's.
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -20,6 +24,8 @@ Trading terminals label launchpad tokens from a hand-maintained allowlist of fac
 | `verified` | Creation event from an address the launchpad (or a reputable integration doc) publishes |
 | `observed-emitter` | Same, but the allowlist entry is one we found on-chain ourselves |
 | `code-match` | Matching event, unlisted emitter, same program as a listed factory. New generation or third-party redeploy |
+| `protocol-verified` | Canonical protocol contract (e.g. Doppler Airlock), launched by an app not in the registry |
+| `observed-platform` | Protocol launch by an integrator we identified on-chain as a launchpad, not published by it |
 | `unverified-emitter` | Matching event, unlisted emitter, different code. Never shown as the launchpad |
 | `discovered` | No registry match. A contract that announced several same-template tokens announced this one |
 | `discovered-first` | The announcing contract has announced exactly one token. One-off deployer or brand-new factory |
@@ -48,7 +54,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 | --- | --- |
 | `/api/v1/token/:chainId/:address` | Verdict, launchpad, factory (with tokens announced and first-seen age), birth tx, bytecode template, announcers |
 | `/api/v1/recent/:chainId?limit=50` | Newest births |
-| `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `dex-plumbing` \| …, `sinceHours=24` (first seen within N hours, excluding anything already active when the index started), `min=2`, `limit=100` |
+| `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). `firstActivityAgoSec` is the contract's first log on-chain (dated in idle time by an address-filtered getLogs lookback, default 7 days), not when this index first saw it. `makerShare` = share of its tokens whose deployer called it or whose first mint went to it. Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `pool-hook` \| `dex-plumbing` \| …, `sinceHours=24` (first on-chain activity within N hours; undated systems are counted in `pendingAgeCheck`, never guessed), `min=2`, `limit=100`. Response carries `total` beside the page. |
 | `/api/v1/launchpads/:chainId` | Registry with provenance per factory address and indexed counts |
 | `/api/v1/chains` | Configured chains and indexer status (head, lag, discovery on/off) |
 | `/health` | Same, with `ok` |
@@ -126,6 +132,7 @@ src/attribution.js  registry loader, event matching, "who announced this token" 
 src/births.js       records one birth (shared by indexer and on-demand lookups)
 src/indexer.js      the loop
 src/lookup.js       index rows -> public JSON, candidates (the detector)
+src/age.js          dates announcing contracts by their first on-chain log
 src/explorer.js     optional explorer adapters (Etherscan V2, Blockscout PRO)
 src/server.js       HTTP API + static page, strict CSP
 public/             the lookup page (no framework, no inline script)

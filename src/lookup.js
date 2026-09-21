@@ -8,6 +8,8 @@ const VERDICTS = {
   verified: ['Verified factory', 'A creation event from an address the launchpad publishes as its factory names this token.'],
   'observed-emitter': ['Observed factory', 'The creation event comes from a factory we identified on-chain. The launchpad has not published this address.'],
   'code-match': ['Same code, unlisted address', 'The emitter runs the same program as a listed factory but sits at an address nobody has published. It can be a new generation or a third-party redeploy.'],
+  'protocol-verified': ['Verified protocol, unlisted app', 'Created through the canonical contract of a permissionless launch protocol, by an app (integrator) that is not in the registry. The protocol part is certain; which app launched it is not a known one.'],
+  'observed-platform': ['Observed launchpad', 'Created through a launch protocol by an integrator we identified on-chain as this launchpad. The launchpad has not published this address.'],
   'unverified-emitter': ['Look-alike event', 'The event signature matches a known launchpad, but the emitter is not one of its published factories. Several launchpads share signatures and anyone can emit one.'],
   discovered: ['Unlisted factory', 'No launchpad in the registry claims this token. A contract that has announced several tokens of one template did, which is what a factory looks like.'],
   'discovered-first': ['First sighting', 'The contract that announced this token has announced no other token in this index. A one-off deployer and a brand-new factory look identical until the second token.'],
@@ -51,6 +53,11 @@ export class Lookup {
         FROM birth_refs r JOIN tokens t ON t.chain_id = r.chain_id AND t.address = r.token
         WHERE r.chain_id = ? AND r.block >= ? AND r.emitter = ?`),
       emitterTokens: db.prepare('SELECT DISTINCT token FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ?'),
+      // of this emitter's tokens that carry birth facts: how many it served as pool hook, and how many it made
+      emitterRoles: db.prepare(`SELECT COUNT(DISTINCT CASE WHEN t.tx_to IS NOT NULL OR t.mint_to IS NOT NULL THEN t.address END) AS with_facts,
+          COUNT(DISTINCT CASE WHEN t.v4_hook = r.emitter THEN t.address END) AS as_hook
+        FROM birth_refs r JOIN tokens t ON t.chain_id = r.chain_id AND t.address = r.token
+        WHERE r.chain_id = ? AND r.emitter = ? AND r.block >= ?`),
       indexStart: db.prepare('SELECT MIN(block) AS b FROM birth_refs WHERE chain_id = ?'),
       emitterTopics: db.prepare(`SELECT topic0, COUNT(*) AS n FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ? GROUP BY topic0 ORDER BY n DESC LIMIT 5`),
       sampleTokens: db.prepare(`SELECT token FROM birth_refs WHERE chain_id = ? AND emitter = ? AND block >= ? GROUP BY token ORDER BY MAX(block) DESC LIMIT 3`),
@@ -100,13 +107,18 @@ export class Lookup {
     return { role: 'unlisted', label: null, event: null };
   }
 
-  #announcers(chainId, token) {
+  #announcers(chainId, token, row = {}) {
     const rows = this.store.q.refsOf.all(chainId, token);
     const byEmitter = new Map();
     for (const r of rows) {
       const c = this.#classify(chainId, r.emitter, r.topic0);
+      // the pool's v4 hook mentions every token it serves: machinery, not the maker
+      if (c.role === 'unlisted' && r.emitter === row.v4_hook) { c.role = 'hook'; c.label = "Uniswap v4 hook of this token's pool"; }
       const prev = byEmitter.get(r.emitter);
-      const rank = { registry: 4, 'look-alike': 3, unlisted: 2, companion: 1, infra: 0 }[c.role];
+      // called by the deployer, or received the first mint: that contract made the token
+      const creator = r.emitter === row.tx_to || r.emitter === row.mint_to;
+      const rank = { registry: 5, 'look-alike': 4, unlisted: creator ? 3 : 2, hook: 1.5, companion: 1, infra: 0 }[c.role];
+      c.creator = creator;
       if (!prev || rank > prev.rank) byEmitter.set(r.emitter, { emitter: r.emitter, topic0: r.topic0, logIndex: r.log_index, rank, ...c, ...this.#emitterInfo(chainId, r.emitter) });
     }
     // A factory announces many tokens of one template. Per-launch helper contracts announce one.
@@ -114,7 +126,7 @@ export class Lookup {
     // Next to a contract that announces many tokens, a contract that announced only this one
     // is a per-launch helper (its bonding curve, its tax processor), not a rival factory.
     const hasSerial = list.some((a) => a.births >= 2 && a.role !== 'infra');
-    for (const a of list) if (a.role === 'unlisted' && a.births < 2 && hasSerial) { a.role = 'helper'; a.rank = 1; }
+    for (const a of list) if (a.role === 'unlisted' && !a.creator && a.births < 2 && hasSerial) { a.role = 'helper'; a.rank = 1; }
     return list.sort((a, b) =>
       b.rank - a.rank || Number((b.purity ?? 0) >= 0.8) - Number((a.purity ?? 0) >= 0.8) || b.births - a.births || a.logIndex - b.logIndex,
     ).map(({ rank, ...a }) => a);
@@ -134,11 +146,15 @@ export class Lookup {
   #shape(chain, row, { adhoc = false } = {}) {
     const reg = this.registries.get(chain.id);
     const lp = row.launchpad_id ? reg.launchpads.get(row.launchpad_id) ?? { id: row.launchpad_id, name: row.launchpad_id } : null;
-    const announcers = adhoc ? [] : this.#announcers(chain.id, row.address);
+    const announcers = adhoc ? [] : this.#announcers(chain.id, row.address, row);
     const cluster = this.#cluster(chain.id, row.fp_key);
-    const primary = announcers.find((a) => a.role === 'unlisted' || a.role === 'look-alike' || a.role === 'registry') ?? null;
+    const primary = announcers.find((a) => a.role === 'unlisted' || a.role === 'look-alike' || a.role === 'registry') ?? announcers.find((a) => a.role === 'hook') ?? null;
 
     let code = row.confidence ?? 'none';
+    // protocol launches: the verdict is about the app, not the protocol contract
+    const protocolLaunch = Boolean(row.platform);
+    if (protocolLaunch && code === 'verified' && lp && reg.byTopic0 && [...reg.byTopic0.values()].flat().some((s) => s.launchpadId === lp.id && s.platform)) code = 'protocol-verified';
+    else if (protocolLaunch && code === 'observed-emitter') code = 'observed-platform';
     let likely = null;
     if (code === 'discovered' && !primary) code = 'discovered-silent';
     else if (code === 'discovered' && primary.births < 2) code = 'discovered-first';
@@ -165,12 +181,18 @@ export class Lookup {
         address: factoryAddr, label: row.factory_label ?? primary?.label ?? null, event: row.event_sig ?? primary?.event ?? null,
         eventFields: row.event_fields ? JSON.parse(row.event_fields) : null,
         sharesSignatureWith: row.family ? JSON.parse(row.family).filter((id) => id !== row.launchpad_id).map((id) => reg.launchpads.get(id)?.name ?? id) : [],
+        platform: row.platform ? {
+          integrator: row.platform === 'unreadable' ? null : row.platform,
+          launchpad: code === 'protocol-verified' ? null : lp?.name ?? null,
+          status: code === 'protocol-verified' ? 'unlisted' : code === 'observed-platform' ? 'observed' : 'confirmed',
+        } : null,
         tokensAnnounced: fstats?.births ?? null, statsWindowBlocks: chain.statsWindowBlocks, firstSeenBlock: fstats?.firstBlock ?? null,
         firstSeenAgoSec: fstats?.firstBlock && head ? Math.max(0, Math.round(((head - fstats.firstBlock) * chain.blockTimeMs) / 1000)) : null,
       } : null,
       birth: row.birth_tx ? {
         block: row.birth_block, tx: row.birth_tx, source: row.birth_source,
         explorerUrl: chain.explorer?.web ? `${chain.explorer.web}/tx/${row.birth_tx}` : null,
+        calledContract: row.tx_to ?? null, firstMintTo: row.mint_to ?? null, v4Hook: row.v4_hook ?? null,
       } : null,
       bytecode: {
         size: row.code_size, kind: row.fp_kind, implementation: row.impl,
@@ -271,7 +293,10 @@ export class Lookup {
       else if (e.known_launchpads >= 2) status = 'shared-plumbing';
       else if (info.purity !== null && info.purity < 0.6 && e.births >= 20) status = 'shared-plumbing'; // many templates = not a factory
       else if (e.known_launchpads === 1 && e.known_births / e.births >= 0.9) status = `companion-of:${e.launchpads}`;
-      members.push({ e, topics, classes, info, status, tokens: null });
+      const roles = this.sql.emitterRoles.get(chain.id, e.emitter, since);
+      if (status === 'new' && roles.with_facts >= 2 && roles.as_hook / roles.with_facts >= 0.5) status = 'pool-hook'; // machinery of the pools, not a maker
+      const age = this.store.q.getAge.get(chain.id, e.emitter);
+      members.push({ e, topics, classes, info, status, tokens: null, age });
     }
 
     // group emitters that announce the same tokens (Jaccard >= 0.9) into one system
@@ -297,6 +322,15 @@ export class Lookup {
       const first = Math.min(...g.map((m) => m.info.firstBlock ?? m.e.first_block));
       const last = Math.max(...g.map((m) => m.e.last_block));
       const own = p.topics.map((t, i) => ({ t, c: p.classes[i] })).find((x) => x.c.role !== 'infra');
+      // real first activity: the earliest log of any member, when every member has been dated
+      const ageKnown = g.every((m) => m.age);
+      const firstActivity = ageKnown ? Math.min(...g.map((m) => m.age.first_log_block)) : null;
+      // who made the tokens: share of the system's tokens whose deployer called, or whose first mint went to, a member
+      const addrs = g.map((m) => m.e.emitter);
+      const mk = this.store.db.prepare(`SELECT COUNT(DISTINCT t.address) AS with_facts,
+          COUNT(DISTINCT CASE WHEN t.tx_to IN (${addrs.map(() => '?').join(',')}) OR t.mint_to IN (${addrs.map(() => '?').join(',')}) THEN t.address END) AS made
+        FROM birth_refs r JOIN tokens t ON t.chain_id = r.chain_id AND t.address = r.token
+        WHERE r.chain_id = ? AND r.emitter = ? AND r.block >= ? AND (t.tx_to IS NOT NULL OR t.mint_to IS NOT NULL)`).get(...addrs, ...addrs, chain.id, p.e.emitter, since);
       return {
         emitter: p.e.emitter,
         coEmitters: g.slice(1).map((m) => ({ address: m.e.emitter, topEvent: m.topics[0]?.topic0 ?? null })),
@@ -306,6 +340,9 @@ export class Lookup {
         firstSeenBlock: first, lastSeenBlock: last, firstSeenAgoSec: ago(first), lastSeenAgoSec: ago(last),
         // true = it was already active when this index started, so its real age is unknown
         seenFromIndexStart: indexStart !== null && first <= indexStart + hourBlocks,
+        // first log anywhere on-chain within the lookback (null until the idle-time probe has dated it)
+        firstActivityBlock: firstActivity, firstActivityAgoSec: ago(firstActivity), ageKnown,
+        makerShare: mk.with_facts ? Number((mk.made / mk.with_facts).toFixed(3)) : null,
         mechanismTopic: own?.t.topic0 ?? null,
         sampleTokens: this.sql.sampleTokens.all(chain.id, p.e.emitter, since).map((r) => r.token),
       };
@@ -321,7 +358,11 @@ export class Lookup {
     return this.listCache.set(`sys:${chain.id}`, systems);
   }
 
-  /** opts: { status: 'unlisted' (new + look-alike, default) | 'all' | exact status, sinceHours, min, limit } */
+  /**
+   * opts: { status: 'unlisted' (new + look-alike, default) | 'all' | exact status, sinceHours, min, limit }
+   * sinceHours counts a system only when its *first on-chain activity* is that recent. Systems not
+   * dated yet are left out of that count and reported as pendingAgeCheck instead of guessed at.
+   */
   candidates(chainId, opts = {}) {
     const chain = this.chain(chainId);
     if (!chain) return null;
@@ -330,12 +371,17 @@ export class Lookup {
     const limit = Math.min(500, Math.max(1, Number.isFinite(opts.limit) ? opts.limit : 100));
     const maxAge = Number.isFinite(opts.sinceHours) ? opts.sinceHours * 3600 : null;
     const order = { 'look-alike': 0, new: 1 };
-    return this.#systems(chain)
+    let pendingAgeCheck = 0;
+    const all = this.#systems(chain)
       .filter((s) => (status === 'all' ? true : status === 'unlisted' ? s.status === 'new' || s.status === 'look-alike' : s.status === status))
       .filter((s) => s.tokensAnnounced >= min || s.status === 'look-alike')
-      .filter((s) => maxAge === null || (s.firstSeenAgoSec !== null && s.firstSeenAgoSec <= maxAge && !s.seenFromIndexStart))
-      .sort((x, y) => (order[x.status] ?? 2) - (order[y.status] ?? 2) || y.tokensAnnounced - x.tokensAnnounced)
-      .slice(0, limit);
+      .filter((s) => {
+        if (maxAge === null) return true;
+        if (!s.ageKnown) { if (s.firstSeenAgoSec !== null && s.firstSeenAgoSec <= maxAge) pendingAgeCheck++; return false; }
+        return s.firstActivityAgoSec !== null && s.firstActivityAgoSec <= maxAge;
+      })
+      .sort((x, y) => (order[x.status] ?? 2) - (order[y.status] ?? 2) || y.tokensAnnounced - x.tokensAnnounced);
+    return { list: all.slice(0, limit), total: all.length, pendingAgeCheck };
   }
 
   launchpads(chainId) {

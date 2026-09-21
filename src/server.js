@@ -91,7 +91,8 @@ export function createServer({ lookup, log = console }) {
           const num = (k) => { const v = Number.parseFloat(url.searchParams.get(k) ?? ''); return Number.isFinite(v) ? v : undefined; };
           const status = url.searchParams.get('status');
           const opts = { status: status && /^[a-z:\-0-9]{1,40}$/i.test(status) ? status : undefined, sinceHours: num('sinceHours'), min: num('min'), limit: num('limit') };
-          return send(res, 200, { candidates: lookup.candidates(chainId, opts) }, { 'cache-control': 'public, max-age=10' });
+          const r = lookup.candidates(chainId, opts);
+          return send(res, 200, { total: r.total, pendingAgeCheck: r.pendingAgeCheck, returned: r.list.length, candidates: r.list }, { 'cache-control': 'public, max-age=10' });
         }
         if (resource === 'launchpads') return send(res, 200, { launchpads: lookup.launchpads(chainId) }, { 'cache-control': 'public, max-age=60' });
       }

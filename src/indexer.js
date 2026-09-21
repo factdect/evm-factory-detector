@@ -11,7 +11,8 @@
 // so it only runs close to head unless STATE_WINDOW_<id>=0 (archive RPC).
 
 import { matchKnownEvent, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
-import { BirthRecorder } from './births.js';
+import { probePendingAges } from './age.js';
+import { BirthRecorder, probePendingPlatforms } from './births.js';
 import { getLogsRange, hex, isStateUnavailable } from './rpc.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,7 +39,16 @@ export class Indexer {
         const head = Number(await this.rpc.call('eth_blockNumber'));
         const target = head - chain.confirmations;
         let next = store.q.getCursor.get(chain.id)?.next_block ?? chain.startBlock ?? Math.max(0, target - chain.backfillBlocks);
-        if (next > target) { this.#setStatus(head, next); await sleep(chain.pollMs); continue; }
+        if (next > target) {
+          this.#setStatus(head, next);
+          // idle: spend a little budget dating new announcers, then wait for blocks
+          try {
+            const fixed = await probePendingPlatforms({ chain, rpc: this.rpc, registry: this.registry, store, max: 36 });
+            if (!fixed) await probePendingAges({ chain, rpc: this.rpc, store, head, max: 2 });
+          } catch (e) { this.log.warn(`[${chain.slug}] idle probe: ${e.message}`); }
+          await sleep(chain.pollMs);
+          continue;
+        }
         const to = Math.min(next + chain.logsChunk - 1, target);
         const stats = await this.processRange(next, to, head);
         this.receiptMisses = 0;

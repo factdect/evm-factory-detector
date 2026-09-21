@@ -24,6 +24,8 @@ const DEFAULTS = {
     stateWindow: 2500,
     backfillBlocks: 6000,   // on first start, begin this many blocks behind head
     multicall3: MULTICALL3,
+    // eth_getLogs filtered by one address accepts huge spans here (measured: 2,000,000 blocks)
+    addrLogsSpan: 2_000_000,
     explorer: { kind: 'blockscout-pro', chainid: 4663, web: 'https://robinhoodchain.blockscout.com' },
   },
   8453: {
@@ -69,6 +71,10 @@ export function loadChains(env = process.env) {
     c.startBlock = num(env[`START_BLOCK_${id}`], null);
     // Factory statistics (tokens announced, template purity) look at the last 3 days by default.
     c.statsWindowBlocks = num(env[`STATS_WINDOW_BLOCKS_${id}`], Math.round((3 * 86400 * 1000) / c.blockTimeMs));
+    // A contract that emitted anything before we first saw it announce a token is not new.
+    // We look this far back for its first log (default 7 days).
+    c.addrLogsSpan = num(env[`ADDR_LOGS_SPAN_${id}`], c.addrLogsSpan ?? c.logsChunk);
+    c.ageLookbackBlocks = num(env[`AGE_LOOKBACK_BLOCKS_${id}`], Math.round((7 * 86400 * 1000) / c.blockTimeMs));
     out.set(id, c);
   }
   if (out.size === 0) throw new Error('CHAINS is empty. Example: CHAINS=4663 or CHAINS=4663,8453');

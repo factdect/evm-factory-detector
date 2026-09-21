@@ -14,8 +14,8 @@
   const plural = (n, one, many) => `${Number(n).toLocaleString('en-US')} ${Number(n) === 1 ? one : many}`;
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString('en-US'));
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'flat', 'bytecode-cluster': 'warn', none: 'flat' };
-  const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], infra: ['Shared plumbing', 'flat'] };
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'flat', 'bytecode-cluster': 'warn', none: 'flat' };
+  const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
   let chainId = null;
@@ -52,7 +52,7 @@
     const dl = $('fields');
     dl.replaceChildren();
     const MAKER = { discovered: 'Unlisted factory', 'discovered-first': 'New or one-off deployer', 'discovered-silent': 'Nobody announced it', 'unverified-emitter': 'Unverified', 'code-match': 'Unverified' };
-    const maker = d.launchpad?.name ?? (d.likelyLaunchpad ? `${d.likelyLaunchpad.name}?` : MAKER[d.verdict.code] ?? 'Unknown');
+    const maker = d.verdict.code === 'protocol-verified' ? `${d.launchpad?.name ?? 'Protocol'}, unlisted app` : d.launchpad?.name ?? (d.likelyLaunchpad ? `${d.likelyLaunchpad.name}?` : MAKER[d.verdict.code] ?? 'Unknown');
     field(dl, 'Maker', maker, {
       big: true,
       note: d.launchpad?.stack ?? (d.likelyLaunchpad ? `Template shared with ${num(d.likelyLaunchpad.tokens)} ${d.likelyLaunchpad.name} tokens. A template can be copied, so this is not proof.` : null),
@@ -60,6 +60,7 @@
     if (d.factory) {
       const bits = [];
       if (d.factory.label) bits.push(d.factory.label);
+      if (d.factory.platform?.integrator) bits.push(d.factory.platform.status === 'unlisted' ? `launched by unlisted app ${short(d.factory.platform.integrator)}` : `app ${short(d.factory.platform.integrator)}`);
       if (d.factory.event) bits.push(`event ${d.factory.event.split('(')[0]}`);
       if (d.factory.tokensAnnounced != null) bits.push(`${plural(d.factory.tokensAnnounced, 'token', 'tokens')} announced recently`);
       if (d.factory.firstSeenAgoSec != null) bits.push(`first seen ${ago(d.factory.firstSeenAgoSec)}`);
@@ -159,7 +160,7 @@
         el('td', {}, el('span', { class: 'hex', text: short(c.emitter) }), c.status === 'look-alike' ? el('div', {}, tag('Look-alike event', 'bad')) : null, note(c) ? el('div', { class: 'sub', text: note(c) }) : null),
         el('td', { class: 'num', text: num(c.tokensAnnounced) }),
         el('td', { class: 'num', text: c.templatePurity == null ? '–' : `${Math.round(c.templatePurity * 100)}%` }),
-        el('td', { class: 'num', text: c.seenFromIndexStart ? 'before this index' : ago(c.firstSeenAgoSec) ?? '–' }),
+        el('td', { class: 'num', text: c.ageKnown ? ago(c.firstActivityAgoSec) ?? '–' : c.seenFromIndexStart ? 'before this index' : `${ago(c.firstSeenAgoSec) ?? '–'} (checking)` }),
       ), c.sampleTokens[0])), 'Every active factory is already in the registry.');
       return tokens;
     } catch {

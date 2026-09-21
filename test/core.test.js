@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { loadRegistry, matchKnownEvent, pad32, refsForToken } from '../src/attribution.js';
-import { reattributeFromEvidence } from '../src/births.js';
+import { loadRegistry, matchKnownEvent, pad32, refsForToken, resolvePlatform } from '../src/attribution.js';
+import { probeFirstLog } from '../src/age.js';
+import { birthFacts, probePendingPlatforms, reattributeFromEvidence } from '../src/births.js';
 import { openDb } from '../src/db.js';
 import { findCreation } from '../src/explorer.js';
 import { Lookup } from '../src/lookup.js';
@@ -70,10 +71,11 @@ const createLog = (emitter) => ({
   data: '0x' + pad32(TOKEN).slice(2) + pad32('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544').slice(2) + pad32('0x8366a39cc670b4001a1121b8f6a443a643e40951').slice(2),
 });
 
-test('attribution: Airlock Create from the published Airlock is verified', () => {
+test('attribution: Airlock Create from the published Airlock is a verified Doppler launch; the app comes later', () => {
   const m = matchKnownEvent(reg, createLog(AIRLOCK));
   assert.equal(m.token, TOKEN);
-  assert.equal(m.launchpadId, 'long-xyz');
+  assert.equal(m.launchpadId, 'doppler');
+  assert.ok(m.platform, 'carries the integrator resolver');
   assert.equal(m.confidence, 'verified');
   assert.equal(m.fields.numeraire, '0x' + '0'.repeat(40));
 });
@@ -82,7 +84,7 @@ test('attribution: the same event from any other contract is never credited to t
   const m = matchKnownEvent(reg, createLog('0x' + 'be'.repeat(20)));
   assert.equal(m.launchpadId, null);
   assert.equal(m.confidence, 'unverified-emitter');
-  assert.deepEqual(m.family, ['long-xyz']);
+  assert.deepEqual(m.family, ['doppler']);
 });
 
 test('attribution: checksummed / upper-case input still matches', () => {
@@ -282,7 +284,8 @@ test('candidates: co-firing contracts are one system, a rotating factory is one 
   for (let i = 0; i < 6; i++) birth(495_000 + i, 'skel:P', [[PONS2, PONS2_TOPIC], [POOLMGR, INIT]], 'pons-v2');                               // published factory
   birth(499_000, 'skel:S', [[SPOOF, PONS2_TOPIC]]);                                                                                          // one look-alike event
 
-  const all = lk.candidates(4663);
+  const C = (o) => lk.candidates(4663, o).list;
+  const all = C();
   assert.deepEqual(all.map((c) => c.status), ['look-alike', 'new', 'new', 'new'], 'look-alikes first, even with a single token');
   const sysA = all.find((c) => c.emitter === A || c.emitter === A2);
   assert.equal(sysA.coEmitters.length, 1, 'A and A2 announce the same tokens: one system');
@@ -290,6 +293,106 @@ test('candidates: co-firing contracts are one system, a rotating factory is one 
   const r1 = all.find((c) => c.emitter === R1);
   assert.deepEqual([r1.mechanism.addresses, r1.mechanism.otherAddresses], [2, [R2]], 'same creation event at two addresses');
   assert.ok(!all.some((c) => c.emitter === POOLMGR || c.emitter === PONS2), 'plumbing and published factories are not candidates');
-  assert.equal(lk.candidates(4663, { status: 'all' }).find((c) => c.emitter === POOLMGR).status, 'dex-plumbing');
-  assert.deepEqual(lk.candidates(4663, { status: 'new', sinceHours: 1 }).map((c) => c.emitter).sort(), [R1, R2].sort(), 'only what first appeared in the last hour');
+  assert.equal(C({ status: 'all' }).find((c) => c.emitter === POOLMGR).status, 'dex-plumbing');
+
+  // age: nothing is "new in the last hour" until it has been dated on-chain
+  assert.deepEqual(lk.candidates(4663, { sinceHours: 1 }), { list: [], total: 0, pendingAgeCheck: 3 }, 'R1, R2 and the one-token look-alike all appeared this hour, none dated yet');
+  store.q.putAge.run(4663, R1, 480_000, 0, 0); // first log = first sighting: genuinely new
+  store.q.putAge.run(4663, R2, 490_000, 0, 0);
+  store.q.putAge.run(4663, A, 100_000, 0, 0);
+  store.q.putAge.run(4663, A2, 100_000, 0, 0);
+  lk.listCache.m.clear();
+  assert.deepEqual(C({ status: 'new', sinceHours: 1 }).map((c) => c.emitter).sort(), [R1, R2].sort(), 'first on-chain activity within the hour');
+  // R2 turns out to have logged long before the index saw it: an old contract, not a new one
+  store.q.putAge.run(4663, R2, 10, 0, 0);
+  lk.listCache.m.clear();
+  assert.deepEqual(C({ status: 'new', sinceHours: 1 }).map((c) => c.emitter), [R1]);
+});
+
+test('birthFacts + ranking: the launcher the deployer called is the maker, not the v4 hook that fired first (zLIQ, block 69057653)', () => {
+  const TOKEN_Z = '0x20f346a44d50151ba356e42a7e1d2182048ad71f', HOOK = '0x5370602470386c05a2f0aa9e09765c0c9ab5e0cc', LAUNCHER = '0x4ad187b3735738596fea386d08f4073a5416977b', PM = '0x8366a39cc670b4001a1121b8f6a443a643e40951';
+  const XFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', INIT = '0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438';
+  const word = (h) => h.replace('0x', '').padStart(64, '0');
+  const receipt = { to: LAUNCHER.toUpperCase().replace('0X', '0x'), logs: [
+    { address: TOKEN_Z, logIndex: '0x2', topics: [XFER, '0x' + '0'.repeat(64), pad32(LAUNCHER)], data: '0x' + word('0x33b2e3c9fd0803ce8000000') },
+    { address: HOOK, logIndex: '0x3', topics: ['0x7f67dcb54634da6eb94af60e0a09c89cbea45d29548c0f625a63e28c39489d68', pad32(TOKEN_Z)], data: '0x' },
+    { address: PM, logIndex: '0x4', topics: [INIT, '0x' + 'ab'.repeat(32), '0x' + '0'.repeat(64), pad32(TOKEN_Z)], data: '0x' + word('0xbb8') + word('0x3c') + word(HOOK) + word('0x1') + word('0x0') },
+    { address: TOKEN_Z, logIndex: '0x9', topics: [XFER, pad32(LAUNCHER), pad32(PM)], data: '0x' + word('0x1') },
+    { address: LAUNCHER, logIndex: '0xd', topics: ['0xf2d58b0e90ea2c0d4a4dc09a05f7da1e1ee3d7b58c96b55e5360c28cbb5bfbd4', pad32(TOKEN_Z)], data: '0x' },
+  ] };
+  assert.deepEqual(birthFacts(receipt, TOKEN_Z), { txTo: LAUNCHER, mintTo: LAUNCHER, v4Hook: HOOK });
+  assert.deepEqual(birthFacts({ to: null, logs: [] }, TOKEN_Z), { txTo: null, mintTo: null, v4Hook: null });
+
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 101, 100, 0);
+  const f = birthFacts(receipt, TOKEN_Z);
+  store.saveToken({ chain_id: 4663, address: TOKEN_Z, confidence: 'discovered', birth_block: 90, birth_tx: '0x1', birth_source: 'discovery', fp_key: 'skel:z', tx_to: f.txTo, mint_to: f.mintTo, v4_hook: f.v4Hook });
+  for (const r of refsForToken(receipt.logs, TOKEN_Z)) store.q.addRef.run(4663, TOKEN_Z, r.emitter, r.topic0, r.logIndex, 90);
+  return lk.token(4663, TOKEN_Z).then(({ body }) => {
+    assert.equal(body.factory.address, LAUNCHER, 'the launcher, even though the hook logged first');
+    assert.deepEqual(body.announcers.map((a) => a.role), ['unlisted', 'hook', 'infra']);
+    assert.equal(body.birth.v4Hook, HOOK);
+  });
+});
+
+test('probeFirstLog: finds the earliest log, treats a refused (too busy) range as activity, returns the sighting block when silent', async () => {
+  const chain = { ageLookbackBlocks: 1000, addrLogsSpan: 300 };
+  const asked = [];
+  const rpcWith = (fn) => ({ call: async (_m, [f]) => { asked.push([Number(f.fromBlock), Number(f.toBlock)]); return fn(Number(f.fromBlock), Number(f.toBlock)); } });
+  // logs at 1500 and 1700; lookback starts at 1000
+  assert.deepEqual(await probeFirstLog(rpcWith((a, b) => [1500, 1700].filter((x) => x >= a && x <= b).map((x) => ({ blockNumber: '0x' + x.toString(16) }))), chain, '0xabc', 2000, 1900),
+    { firstLogBlock: 1500, lookbackFrom: 1000 });
+  assert.deepEqual(asked, [[1000, 1299], [1300, 1599]], 'stops at the first chunk with a log');
+  assert.deepEqual(await probeFirstLog(rpcWith((a) => { if (a === 1300) throw new RpcError('eth_getLogs', { message: 'query returned more than 10000 results' }); return []; }), chain, '0xabc', 2000, 1900),
+    { firstLogBlock: 1300, lookbackFrom: 1000 });
+  assert.deepEqual(await probeFirstLog(rpcWith(() => []), chain, '0xabc', 2000, 1900), { firstLogBlock: 1900, lookbackFrom: 1000 });
+});
+
+test('candidates: a v4 hook that serves many tokens is pool machinery, not a new factory', () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 1001, 1000, 0);
+  const HOOK = '0x' + 'ab'.repeat(20), MAKER = '0x' + 'cd'.repeat(20);
+  for (let i = 1; i <= 4; i++) {
+    const t = '0x' + i.toString(16).padStart(40, '0');
+    store.saveToken({ chain_id: 4663, address: t, confidence: 'discovered', birth_block: 900 + i, birth_tx: '0x1', birth_source: 'x', fp_key: 'skel:h', tx_to: MAKER, mint_to: MAKER, v4_hook: HOOK });
+    store.q.addRef.run(4663, t, HOOK, '0x' + '07'.repeat(32), 1, 900 + i);
+    store.q.addRef.run(4663, t, MAKER, '0x' + '08'.repeat(32), 2, 900 + i);
+  }
+  const r = lk.candidates(4663, { status: 'all' }).list;
+  assert.equal(r.find((c) => c.emitter === HOOK || c.coEmitters.some((x) => x.address === HOOK))?.status !== 'new' || r.length === 1, true);
+  const maker = r.find((c) => c.emitter === MAKER || c.coEmitters.some((x) => x.address === MAKER));
+  assert.equal(maker.makerShare, 1, 'the maker made every token it announced');
+  assert.ok(!lk.candidates(4663).list.some((c) => c.emitter === HOOK && c.coEmitters.length === 0), 'a lone hook never appears as a new factory');
+});
+
+test('resolvePlatform: the Doppler integrator decides the launchpad (BURNER vs a Long launch)', async () => {
+  const m = matchKnownEvent(reg, createLog(AIRLOCK));
+  const w = (a) => a.replace('0x', '').padStart(64, '0');
+  const assetData = (integ) => '0x' + [w('0x0f17206447090e464c277571124dd2688e48aea9'), w('0x0'), w('0x0'), w('0x0'), w('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544'), w('0x0'), w('0x0'), w('0x1'), w('0x1'), w(integ)].join('');
+  assert.deepEqual(resolvePlatform(m, assetData('0x92d435c96e63c43e12d6d0ab28f6b0b04072f765')),
+    { platform: '0x92d435c96e63c43e12d6d0ab28f6b0b04072f765', launchpadId: 'long-xyz', confidence: 'observed-emitter', label: null });
+  assert.deepEqual(resolvePlatform(m, assetData('0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4')),
+    { platform: '0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4', launchpadId: 'doppler', confidence: 'verified', label: null }, 'BURNER: Doppler, not Long');
+  assert.equal(resolvePlatform(m, '0x').platform, 'unreadable');
+
+  // old rows credited to Long from the Airlock event alone get moved by the idle probe
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const old = [['0x' + '11'.repeat(20), '0x92d435c96e63c43e12d6d0ab28f6b0b04072f765'], ['0x' + '22'.repeat(20), '0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4']];
+  for (const [t] of old) store.saveToken({ chain_id: 4663, address: t, confidence: 'verified', launchpad_id: 'long-xyz', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', birth_block: 5, birth_tx: '0x1', birth_source: 'registry-event' });
+  const rpc = { batch: async (calls) => calls.map((c) => ({ result: assetData(old.find(([t]) => c.params[0].data.includes(t.slice(2)))[1]) })) };
+  assert.equal(await probePendingPlatforms({ chain, rpc, registry: reg, store }), 2);
+  assert.deepEqual([store.q.getToken.get(4663, old[0][0]).launchpad_id, store.q.getToken.get(4663, old[0][0]).confidence], ['long-xyz', 'observed-emitter']);
+  assert.deepEqual([store.q.getToken.get(4663, old[1][0]).launchpad_id, store.q.getToken.get(4663, old[1][0]).confidence], ['doppler', 'verified']);
+  assert.equal(await probePendingPlatforms({ chain, rpc, registry: reg, store }), 0, 'each token is checked once');
+
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  const b = (await lk.token(4663, old[1][0])).body;
+  assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.status], ['protocol-verified', 'doppler', 'unlisted']);
+  const l = (await lk.token(4663, old[0][0])).body;
+  assert.deepEqual([l.verdict.code, l.launchpad.id, l.factory.platform.status], ['observed-platform', 'long-xyz', 'observed']);
 });

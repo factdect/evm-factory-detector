@@ -4,10 +4,10 @@
   "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk.",
   "launchpads": [
     {
-      "id": "long-xyz",
-      "name": "Long.xyz",
-      "url": "https://app.long.xyz",
-      "stack": "Doppler Airlock, Uniswap v4, tokens are 44-byte minimal proxies",
+      "id": "doppler",
+      "name": "Doppler protocol",
+      "url": "https://docs.doppler.lol",
+      "stack": "Permissionless launch protocol (Whetstone Research). Any app can launch through the Airlock; the integrator stored per asset names the app.",
       "events": [
         {
           "signature": "Create(address,address,address,address)",
@@ -23,10 +23,6 @@
             "initializer": {
               "from": "data",
               "word": 1
-            },
-            "poolOrHook": {
-              "from": "data",
-              "word": 2
             }
           },
           "emitters": [
@@ -34,10 +30,86 @@
               "address": "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862",
               "label": "Airlock",
               "status": "confirmed",
-              "source": "docs.mobula.io/almanac/robinhood-launchpads/longxyz + events observed on-chain 2026-09-18"
+              "source": "docs.doppler.lol/reference/contract-addresses (Robinhood Mainnet 4663)"
             }
-          ]
+          ],
+          "platform": {
+            "call": "function getAssetData(address) view returns (address,address,address,address,address,address,address,uint256,uint256,address)",
+            "field": 9,
+            "name": "integrator",
+            "known": {
+              "0x92d435c96e63c43e12d6d0ab28f6b0b04072f765": {
+                "launchpad": "long-xyz",
+                "status": "observed",
+                "source": "Not published by Long. On-chain 2026-09-21: 205 of 205 sampled launches with this integrator carry Long's 1e18 address suffix, 0 of 95 with any other integrator; most call Long's launcher 0x1eef016f."
+              },
+              "0x21e2ce70511e4fe542a97708e89520471daa7a66": {
+                "launchpad": "doppler",
+                "status": "confirmed",
+                "label": "Doppler (Airlock owner)",
+                "source": "Airlock owner() on-chain"
+              }
+            }
+          }
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+          "label": "DopplerHookInitializer"
         },
+        {
+          "address": "0x7b6147ac3f615bdb764e7ebd5f517dac1ad163b8",
+          "label": "StreamableFeesLockerV2"
+        },
+        {
+          "address": "0xf45588e8e0b1df9db9ae7e20ece5726ae931357c",
+          "label": "Bundler"
+        },
+        {
+          "address": "0x1b37d3a72082029c44b35b604ea473617580b69a",
+          "label": "DopplerERC20V1Factory"
+        },
+        {
+          "address": "0x4389ad34938b14f25cff7ed983c53f5a42a2573f",
+          "label": "DopplerDeployer"
+        },
+        {
+          "address": "0xba2f330edb16cd8056f5988d8ce19bbc63475a0e",
+          "label": "NoOpMigrator"
+        },
+        {
+          "address": "0x7bf319d8e969f7596b1bc171da9ce322f67ae0c4",
+          "label": "DopplerHookMigrator"
+        },
+        {
+          "address": "0xc16c826f75338a5ea626f94f8992191b4ce5aba2",
+          "label": "SwapRestrictorDopplerHook"
+        },
+        {
+          "address": "0x5f9eb5f6726fe88d5e39867967f5b833d2fa3215",
+          "label": "RehypeDopplerHookInitializer"
+        },
+        {
+          "address": "0x6cce158b6d1747617fc218592b4d60b239b957ea",
+          "label": "UniswapV4Initializer"
+        },
+        {
+          "address": "0x46adee7595d48b1ec53090e9bc78e1e69fa0ef06",
+          "label": "TopUpDistributor"
+        },
+        {
+          "address": "0x85f37f74ef2478a770318bc810177a9835911ad7",
+          "label": "NoOpGovernanceFactory"
+        }
+      ]
+    },
+    {
+      "id": "long-xyz",
+      "name": "Long.xyz",
+      "url": "https://app.long.xyz",
+      "stack": "Launches through the Doppler protocol (Airlock, Uniswap v4 multicurve). Long launches carry the 1e18 address suffix.",
+      "events": [
         {
           "signature": "Created(address,address,address,bytes32,uint256,uint256,string)",
           "token": {
@@ -57,11 +129,17 @@
           "emitters": [
             {
               "address": "0x22e99278308b393ea1260859b181ad7e78f5eeed",
-              "label": "Factory",
+              "label": "LongLauncher",
               "status": "confirmed",
-              "source": "docs.mobula.io/almanac/robinhood-launchpads/longxyz"
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/longxyz; named LongLauncher in bitquery/streaming-data-platform-docs PR #269"
             }
           ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x1eef016f22a943abc7dd11422edee9d235942104",
+          "label": "launcher (observed: most Long launches call it)"
         }
       ]
     },
