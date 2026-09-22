@@ -416,3 +416,18 @@ test('Indexer.maintain: background probes run from the caught-up path and back o
   await ix.maintain(1000);
   assert.equal(calls, before, 'empty backlog: no RPC, no work');
 });
+
+test('recent: flags unlisted tokens and can return only them', () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  const mk = (addr, block, lp) => store.saveToken({ chain_id: 4663, address: addr, confidence: lp ? 'verified' : 'discovered', launchpad_id: lp, birth_block: block, birth_tx: '0x1', birth_source: 'x', fp_key: 'skel:x', code_size: 300, fp_kind: 'contract' });
+  mk('0x' + '11'.repeat(20), 100, 'pons-v2');
+  mk('0x' + '22'.repeat(20), 101, null);
+  mk('0x' + '33'.repeat(20), 102, 'long-xyz');
+  const all = lk.recent(4663, {});
+  assert.deepEqual(all.map((t) => t.unlisted), [false, true, false], 'newest first, middle one unlisted');
+  const only = lk.recent(4663, { attributed: false });
+  assert.deepEqual(only.map((t) => t.address), ['0x' + '22'.repeat(20)]);
+  assert.ok(only.every((t) => t.unlisted));
+});

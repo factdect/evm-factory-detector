@@ -85,7 +85,9 @@ export function createServer({ lookup, log = console }) {
         }
         if (resource === 'recent') {
           const n = Number.parseInt(url.searchParams.get('limit') ?? '50', 10);
-          return send(res, 200, { tokens: lookup.recent(chainId, Number.isFinite(n) ? n : 50) }, { 'cache-control': 'public, max-age=3' });
+          const a = url.searchParams.get('attributed');
+          const tokens = lookup.recent(chainId, { limit: Number.isFinite(n) ? n : 50, attributed: a === 'false' ? false : undefined });
+          return send(res, 200, { tokens, unlisted: tokens.filter((t) => t.unlisted).length }, { 'cache-control': 'public, max-age=3' });
         }
         if (resource === 'candidates') {
           const num = (k) => { const v = Number.parseFloat(url.searchParams.get(k) ?? ''); return Number.isFinite(v) ? v : undefined; };

@@ -245,13 +245,18 @@ export class Lookup {
     return { status: 200, body: this.#shape(chain, row, { adhoc: true }) };
   }
 
-  recent(chainId, limit = 50) {
+  /** opts: { limit, attributed: false = only tokens with no known launchpad } */
+  recent(chainId, opts = {}) {
     const chain = this.chain(chainId);
     if (!chain) return null;
     const reg = this.registries.get(chain.id);
-    return this.store.q.recent.all(chain.id, Math.min(Math.max(1, limit), 200)).map((r) => ({
+    const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? opts.limit : 50), 200);
+    const q = opts.attributed === false ? this.store.q.recentUnlisted : this.store.q.recent;
+    return q.all(chain.id, limit).map((r) => ({
       address: r.address, symbol: r.symbol, name: r.name, birthBlock: r.birth_block, birthTx: r.birth_tx,
       launchpad: r.launchpad_id ? reg.launchpads.get(r.launchpad_id)?.name ?? r.launchpad_id : null,
+      // unlisted = we have no launchpad for it: a discovered/unverified factory, or none at all
+      unlisted: !r.launchpad_id,
       confidence: r.confidence, factory: r.factory, codeSize: r.code_size, bytecodeKind: r.fp_kind, cluster: r.fp_key,
     }));
   }

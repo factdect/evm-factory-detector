@@ -76,6 +76,11 @@ th { text-align: left; font: 500 15px var(--display); letter-spacing: .03em; col
 td { padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.pick { cursor: pointer; } tr.pick:hover td { background: rgba(255,255,255,.35); }
+tr.unlisted td { background: rgba(214,158,46,.13); }
+tr.unlisted:hover td { background: rgba(214,158,46,.22); }
+tr.unlisted td:first-child { box-shadow: inset 3px 0 0 var(--warn, #b7791f); }
+.row-between { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.toggle { font-size: 14px; color: var(--ink-2); cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 6px; }
 .tag { display: inline-block; font: 600 13px/1 var(--display); letter-spacing: .05em; padding: 3px 6px 2px; border: 1px solid var(--tone); color: var(--tone); border-radius: 3px; white-space: nowrap; }
 caption { text-align: left; caption-side: top; }
 td .hex, td.num { white-space: nowrap; }

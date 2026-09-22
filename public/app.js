@@ -144,13 +144,17 @@
       return tr;
     };
     try {
-      const { tokens } = await api(`/api/v1/recent/${chainId}?limit=15`);
-      table($('recent'), ['Token', 'Maker', 'Block', 'Pattern'], tokens.map((t) => pickable(el('tr', {},
+      const onlyUnlisted = $('unlisted-only')?.checked;
+      const { tokens, unlisted } = await api(`/api/v1/recent/${chainId}?limit=25${onlyUnlisted ? '&attributed=false' : ''}`);
+      const rowOf = (t) => { const tr = pickable(el('tr', {},
         el('td', {}, el('strong', { text: t.symbol || '(no symbol)' }), el('div', { class: 'hex', text: short(t.address) })),
         el('td', {}, t.launchpad ? tag(t.launchpad, TONE[t.confidence] ?? 'flat') : tag(t.confidence === 'discovered' ? 'Unlisted' : 'Unverified', t.confidence === 'discovered' ? 'warn' : 'bad')),
         el('td', { class: 'num', text: num(t.birthBlock) }),
         el('td', { text: t.bytecodeKind === 'minimal-proxy' ? `${t.codeSize}-byte clone` : `${num(t.codeSize)} bytes` }),
-      ), t.address)), 'No births indexed yet. The indexer fills this within a minute of starting.');
+      ), t.address); if (t.unlisted) tr.classList.add('unlisted'); return tr; };
+      table($('recent'), ['Token', 'Maker', 'Block', 'Pattern'], tokens.map(rowOf), onlyUnlisted ? 'No unlisted tokens in the latest births — every recent factory is in the registry.' : 'No births indexed yet. The indexer fills this within a minute of starting.');
+      const noteEl = $('recent-note');
+      if (noteEl) noteEl.textContent = onlyUnlisted ? `${tokens.length} unlisted (no known factory), newest first` : `${unlisted} of the newest ${tokens.length} are unlisted — highlighted below`;
       const { candidates } = await api(`/api/v1/candidates/${chainId}`);
       const note = (c) => [
         c.coEmitters?.length ? `works with ${plural(c.coEmitters.length, 'other contract', 'other contracts')}` : null,
@@ -181,6 +185,7 @@
     $('trace').addEventListener('submit', (ev) => { ev.preventDefault(); trace($('address').value.trim()); });
     window.addEventListener('popstate', () => { const p = location.pathname.match(/^\/t\/(\d+)\/(0x[0-9a-fA-F]{40})$/); if (p) trace(p[2], { push: false }); });
 
+    $('unlisted-only')?.addEventListener('change', () => lists());
     const tokens = await lists();
     if (m) trace(m[2], { push: false });
     else if (tokens[0]) trace(tokens[0].address, { push: false }); // open on a real, current example

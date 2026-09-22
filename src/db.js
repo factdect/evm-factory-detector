@@ -72,6 +72,8 @@ export function openDb(file = process.env.DB_PATH || './data/factory.db') {
     refsOf: db.prepare('SELECT emitter, topic0, log_index FROM birth_refs WHERE chain_id = ? AND token = ? ORDER BY log_index ASC'),
     recent: db.prepare(`SELECT * FROM tokens WHERE chain_id = ? AND is_lp = 0 AND birth_block IS NOT NULL
       ORDER BY birth_block DESC LIMIT ?`),
+    recentUnlisted: db.prepare(`SELECT * FROM tokens WHERE chain_id = ? AND is_lp = 0 AND birth_block IS NOT NULL AND launchpad_id IS NULL
+      ORDER BY birth_block DESC LIMIT ?`),
     cluster: db.prepare(`SELECT COALESCE(launchpad_id, '') AS launchpad_id, COUNT(*) AS n FROM tokens
       WHERE chain_id = ? AND fp_key = ? GROUP BY 1 ORDER BY n DESC`),
     factoryStats: db.prepare(`SELECT COUNT(*) AS births, MIN(birth_block) AS first_block, MAX(birth_block) AS last_block
