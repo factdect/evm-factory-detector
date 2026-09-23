@@ -118,9 +118,29 @@ export function openDb(file = process.env.DB_PATH || './data/factory.db') {
     getAge: db.prepare('SELECT first_log_block, lookback_from FROM emitter_age WHERE chain_id = ? AND address = ?'),
     putAge: db.prepare('INSERT OR REPLACE INTO emitter_age (chain_id, address, first_log_block, lookback_from, probed_at) VALUES (?, ?, ?, ?, ?)'),
     // serial announcers we have not dated yet, busiest first
-    agePending: db.prepare(`SELECT r.emitter, MIN(r.block) AS first_block, COUNT(DISTINCT r.token) AS births FROM birth_refs r
-      WHERE r.chain_id = ? AND r.block >= ? AND NOT EXISTS (SELECT 1 FROM emitter_age a WHERE a.chain_id = r.chain_id AND a.address = r.emitter)
-      GROUP BY r.emitter HAVING births >= 2 ORDER BY births DESC LIMIT ?`),
+    agePending: db.prepare(`SELECT emitter, MIN(first_block) AS first_block, SUM(births) AS births FROM (
+        SELECT r.emitter AS emitter, MIN(r.block) AS first_block, COUNT(DISTINCT r.token) AS births FROM birth_refs r
+          WHERE r.chain_id = @c AND r.block >= @s GROUP BY r.emitter
+        UNION ALL
+        -- silent factories: made tokens (called by the deployer / got the mint) without emitting anything
+        SELECT t.mint_to AS emitter, MIN(t.birth_block), COUNT(*) FROM tokens t
+          WHERE t.chain_id = @c AND t.birth_block >= @s AND t.mint_to IS NOT NULL AND t.mint_to = t.tx_to GROUP BY t.mint_to
+      ) x WHERE NOT EXISTS (SELECT 1 FROM emitter_age a WHERE a.chain_id = @c AND a.address = x.emitter)
+      GROUP BY emitter HAVING births >= 2 ORDER BY births DESC LIMIT @n`),
+    // tokens a contract made: the deployer called it AND the first mint went to it
+    madeBy: db.prepare(`SELECT COUNT(*) AS n, MIN(birth_block) AS first_block, MAX(birth_block) AS last_block FROM tokens
+      WHERE chain_id = ? AND mint_to = ? AND tx_to = ? AND birth_block >= ?`),
+    madeByNames: db.prepare(`SELECT name, COUNT(*) AS n FROM tokens WHERE chain_id = ? AND mint_to = ? AND tx_to = ? AND birth_block >= ?
+      GROUP BY name ORDER BY n DESC LIMIT 5`),
+    // the same name+symbol on other token contracts: the clearest counterfeit signal there is
+    sameName: db.prepare(`SELECT COUNT(*) AS n FROM tokens WHERE chain_id = ? AND name = ? AND symbol = ? AND address != ? AND is_lp = 0`),
+    silentMakers: db.prepare(`SELECT t.mint_to AS maker, COUNT(*) AS n, MIN(t.birth_block) AS first_block, MAX(t.birth_block) AS last_block,
+        COUNT(DISTINCT t.fp_key) AS templates, COUNT(DISTINCT t.name) AS names
+      FROM tokens t
+      WHERE t.chain_id = ? AND t.birth_block >= ? AND t.is_lp = 0 AND t.launchpad_id IS NULL
+        AND t.mint_to IS NOT NULL AND t.mint_to = t.tx_to
+        AND NOT EXISTS (SELECT 1 FROM birth_refs r WHERE r.chain_id = t.chain_id AND r.token = t.address)
+      GROUP BY t.mint_to HAVING n >= 2 ORDER BY n DESC LIMIT 300`),
     putEmitter: db.prepare('INSERT OR REPLACE INTO emitters (chain_id, address, code_size, fp_key, checked_at) VALUES (?, ?, ?, ?, ?)'),
     counts: db.prepare(`SELECT COUNT(*) AS tokens, SUM(launchpad_id IS NOT NULL) AS attributed FROM tokens WHERE chain_id = ? AND is_lp = 0`),
   };

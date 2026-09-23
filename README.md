@@ -23,6 +23,12 @@ A token with no indexed birth is not a dead end. Permissionless protocols keep t
 
 A bytecode template owned by a protocol (the DopplerERC20V1 clone) is shared by every app on that protocol, so the cluster names the protocol (`cluster.template`) and the app split is presented as the template's users, never as a guess about who launched the token in hand.
 
+### Silent factories and reused names
+
+Some factories emit no creation event at all, so event-based discovery sees each of their tokens as a one-off. The indexer records who the deployer called (`tx_to`) and who received the first mint (`mint_to`); when both are the same contract and it has made several tokens, the token's verdict is `silent-factory`, the response names the contract with `tokensMade` and `topNames`, and the contract appears in `/api/v1/candidates` with `silent: true`. A plain direct deploy (no contract called) stays `discovered-silent`.
+
+`token.sameNameElsewhere` counts other token contracts carrying the exact same name and symbol. On Robinhood Chain one silent factory was seen minting five different contracts named "Hylo 3x Leveraged HYPE" in ten hours; this field is how a lookup warns you that the name alone identifies nothing.
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -30,6 +36,7 @@ A bytecode template owned by a protocol (the DopplerERC20V1 clone) is shared by 
 | `verified` | Creation event from an address the launchpad (or a reputable integration doc) publishes |
 | `observed-emitter` | Same, but the allowlist entry is one we found on-chain ourselves |
 | `code-match` | Matching event, unlisted emitter, same program as a listed factory. New generation or third-party redeploy |
+| `silent-factory` | No creation event, but the contract the deployer called also got the mint and has made several tokens this way |
 | `protocol-verified` | Canonical protocol contract (e.g. Doppler Airlock), launched by an app not in the registry |
 | `observed-platform` | Protocol launch by an integrator we identified on-chain as a launchpad, not published by it |
 | `unverified-emitter` | Matching event, unlisted emitter, different code. Never shown as the launchpad |

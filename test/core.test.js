@@ -529,3 +529,30 @@ test('live protocol resolution: an unindexed Doppler token is attributed from ge
   assert.equal(n.likelyLaunchpad, null, 'a Long-heavy shared template must NOT make the verdict guess Long');
   assert.deepEqual([n.bytecode.cluster.template.name, n.bytecode.cluster.template.sharedByApps], ['Doppler protocol', true]);
 });
+
+test('silent factory: a contract that is called and minted to, many times, with no event, is named as the maker and shows in the detector', () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 1001, 1000, 0);
+  const SILENT = '0x1cbaf24d53fe930fce8eff149fa797d2611da149';
+  const names = ['Hylo 3x Leveraged HYPE', 'Hylo 3x Leveraged HYPE', 'Hylo 3x Leveraged HYPE', 'Codos', 'Pump'];
+  names.forEach((name, i) => store.saveToken({ chain_id: 4663, address: '0x' + (0x70 + i).toString(16).padStart(40, '0'), confidence: 'discovered', name, symbol: name === 'Codos' ? 'CODOS' : name === 'Pump' ? 'PUMP' : 'xHYPE',
+    birth_block: 900 + i, birth_tx: '0x1', birth_source: 'discovery', fp_key: 'skel:spam', tx_to: SILENT, mint_to: SILENT }));
+  // a one-off direct deploy: never called a contract, stays discovered-silent
+  store.saveToken({ chain_id: 4663, address: '0x' + '99'.repeat(20), confidence: 'discovered', name: 'Carve', symbol: 'CARVE', birth_block: 950, birth_tx: '0x2', birth_source: 'discovery', fp_key: 'skel:c', tx_to: null, mint_to: '0x' + 'aa'.repeat(20) });
+
+  return lk.token(4663, '0x' + (0x70).toString(16).padStart(40, '0')).then(async ({ body }) => {
+    assert.equal(body.verdict.code, 'silent-factory');
+    assert.equal(body.factory.address, SILENT);
+    assert.equal(body.factory.silent, true);
+    assert.equal(body.factory.tokensMade, 5);
+    assert.deepEqual(body.factory.topNames[0], { name: 'Hylo 3x Leveraged HYPE', tokens: 3 });
+    assert.equal(body.token.sameNameElsewhere, 2, 'two other contracts carry the exact same name + symbol');
+    const carve = (await lk.token(4663, '0x' + '99'.repeat(20))).body;
+    assert.equal(carve.verdict.code, 'discovered-silent', 'a direct deploy is not promoted to a factory');
+    const sys = lk.candidates(4663, { status: 'all' }).list.find((c) => c.emitter === SILENT);
+    assert.ok(sys, 'the silent factory appears among the candidates');
+    assert.deepEqual([sys.silent, sys.tokensAnnounced, sys.makerShare, sys.distinctNames], [true, 5, 1, 3]);
+  });
+});

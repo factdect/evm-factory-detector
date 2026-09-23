@@ -31,7 +31,7 @@ export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
 export async function probePendingAges({ chain, rpc, store, head, max = 2 }) {
   const since = Math.max(0, head - chain.statsWindowBlocks);
   let n = 0;
-  for (const row of store.q.agePending.all(chain.id, since, max)) {
+  for (const row of store.q.agePending.all({ c: chain.id, s: since, n: max })) {
     const { firstLogBlock, lookbackFrom } = await probeFirstLog(rpc, chain, row.emitter, head, row.first_block);
     store.q.putAge.run(chain.id, row.emitter, firstLogBlock, lookbackFrom, Math.floor(Date.now() / 1000));
     n++;

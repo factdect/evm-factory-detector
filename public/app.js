@@ -16,7 +16,7 @@
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
   // Only a verified/observed launchpad is 'ok' (teal). Everything unproven is 'warn' (amber);
   // a look-alike event is 'bad' (red). A bare direct deploy is never neutral.
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
   const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
@@ -62,6 +62,7 @@
     if (d.factory) {
       const bits = [];
       if (d.factory.label) bits.push(d.factory.label);
+      if (d.factory.silent) bits.push(`emits no creation event; made ${plural(d.factory.tokensMade, 'token', 'tokens')} this way recently${d.factory.topNames?.length ? `, e.g. ${d.factory.topNames.slice(0, 3).map((n) => `"${n.name}"${n.tokens > 1 ? ` ×${n.tokens}` : ''}`).join(', ')}` : ''}`);
       if (d.factory.platform?.integrator) bits.push(d.factory.platform.status === 'unlisted' ? `launched by unlisted app ${short(d.factory.platform.integrator)}` : `app ${short(d.factory.platform.integrator)}`);
       if (d.factory.event) bits.push(`event ${d.factory.event.split('(')[0]}`);
       if (d.factory.tokensAnnounced != null) bits.push(`${plural(d.factory.tokensAnnounced, 'token', 'tokens')} announced recently`);
@@ -70,7 +71,7 @@
       field(dl, 'Factory', hexLink(d.factory.address), { note: bits.join(', ') });
     }
     const t = d.token;
-    field(dl, 'Token', hexLink(t.address), { note: [t.name, t.symbol ? `(${t.symbol})` : null].filter(Boolean).join(' ') || 'No ERC-20 name' });
+    field(dl, 'Token', hexLink(t.address), { note: [[t.name, t.symbol ? `(${t.symbol})` : null].filter(Boolean).join(' ') || 'No ERC-20 name', t.sameNameElsewhere ? `the same name and symbol is on ${plural(t.sameNameElsewhere, 'other token contract', 'other token contracts')}: check you have the right one` : null].filter(Boolean).join('. ') });
     if (d.birth) field(dl, 'Created in', hexLink(d.birth.tx, 'tx'), { note: `block ${num(d.birth.block)}` });
     const b = d.bytecode;
     const pattern = b.kind === 'minimal-proxy' ? `${b.size}-byte clone of ${short(b.implementation)}` : `${num(b.size)}-byte ${b.kind === 'eip1967-proxy' ? 'upgradeable proxy' : 'contract'}`;
@@ -186,6 +187,7 @@
       const note = (c) => [
         c.coEmitters?.length ? `works with ${plural(c.coEmitters.length, 'other contract', 'other contracts')}` : null,
         c.mechanism?.addresses > 1 ? `same creation event at ${c.mechanism.addresses} addresses: a factory that rotates` : null,
+        c.silent ? `silent: emits no creation event${c.distinctNames ? `, ${plural(c.distinctNames, 'name', 'names')} reused across ${num(c.tokensAnnounced)} tokens` : ''}` : null,
       ].filter(Boolean).join(', ');
       table($('candidates'), ['Contract', 'Tokens announced', 'One template', 'First seen'], candidates.slice(0, 40).map((c) => pickable(el('tr', {},
         el('td', {}, el('span', { class: 'hex', text: short(c.emitter) }), c.status === 'look-alike' ? el('div', {}, tag('Look-alike event', 'bad')) : null, note(c) ? el('div', { class: 'sub', text: note(c) }) : null),

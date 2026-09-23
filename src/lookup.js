@@ -13,6 +13,7 @@ const VERDICTS = {
   'unverified-emitter': ['Look-alike event', 'The event signature matches a known launchpad, but the emitter is not one of its published factories. Several launchpads share signatures and anyone can emit one.'],
   discovered: ['Unlisted factory', 'No launchpad in the registry claims this token. A contract that has announced several tokens of one template did, which is what a factory looks like.'],
   'discovered-first': ['First sighting', 'The contract that announced this token has announced no other token in this index. A one-off deployer and a brand-new factory look identical until the second token.'],
+  'silent-factory': ['Unlisted silent factory', 'A contract the deployer called created and received this token, and has created other tokens the same way, without ever emitting a creation event. A factory that stays quiet is not in any launchpad registry.'],
   'discovered-silent': ['No factory event', 'The contract appeared and minted in one transaction, and no other contract announced it. Deployed directly, or by a factory that emits nothing.'],
   'bytecode-cluster': ['Bytecode match only', 'The birth transaction is not indexed. The bytecode matches a template used by a known launchpad, which shows the template, not who deployed it.'],
   none: ['No birth record', 'This index holds no birth transaction for the token, and no launch protocol has an on-chain record of it either: it was deployed directly, or by a factory this registry does not know. With an explorer key configured, older tokens are traced on demand.'],
@@ -197,12 +198,23 @@ export class Lookup {
     let likely = null;
     if (code === 'discovered' && !primary) code = 'discovered-silent';
     else if (code === 'discovered' && primary.births < 2) code = 'discovered-first';
+    // no event anywhere, but the deployer called a contract that also got the mint: that contract is the maker
+    let silentMaker = null;
+    if (code === 'discovered-silent' && row.mint_to && row.mint_to === row.tx_to) {
+      const since = this.#since(chain.id);
+      const made = this.store.q.madeBy.get(chain.id, row.mint_to, row.mint_to, since);
+      if (made.n >= 2) {
+        code = 'silent-factory';
+        silentMaker = { address: row.mint_to, tokensMade: made.n, firstBlock: made.first_block, lastBlock: made.last_block,
+          topNames: this.store.q.madeByNames.all(chain.id, row.mint_to, row.mint_to, since).map((r) => ({ name: r.name, tokens: r.n })) };
+      }
+    }
     if (code === 'none' && cluster) {
       const top = cluster.launchpads[0];
       if (top?.id && top.share >= 0.9 && top.tokens >= 5 && !cluster.template?.sharedByApps) { code = 'bytecode-cluster'; likely = { id: top.id, name: top.name, share: top.share, tokens: top.tokens }; }
     }
     const [headline, detail] = VERDICTS[code] ?? VERDICTS.none;
-    const factoryAddr = row.factory ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
+    const factoryAddr = row.factory ?? silentMaker?.address ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
     const fstats = factoryAddr ? this.#emitterInfo(chain.id, factoryAddr) : null;
     const head = this.#head(chain.id);
     const known = reg.factoryOf.get(row.address) ?? reg.companionOf.get(row.address) ?? null;
@@ -212,7 +224,9 @@ export class Lookup {
       chain: { id: chain.id, name: chain.name },
       // set when someone pastes a launchpad's own contract instead of a token
       knownContract: known ? { launchpad: reg.launchpads.get(known.launchpadId)?.name ?? known.launchpadId, role: known.label } : null,
-      token: { address: row.address, name: row.name, symbol: row.symbol, decimals: row.decimals, totalSupply: row.total_supply },
+      token: { address: row.address, name: row.name, symbol: row.symbol, decimals: row.decimals, totalSupply: row.total_supply,
+        // other token contracts carrying this exact name and symbol (a counterfeit signal, not proof)
+        sameNameElsewhere: row.name && row.symbol ? this.store.q.sameName.get(chain.id, row.name, row.symbol, row.address).n : 0 },
       verdict: { code, headline, detail },
       launchpad: lp ? { id: lp.id, name: lp.name, url: lp.url ?? null, stack: lp.stack ?? null } : null,
       likelyLaunchpad: likely,
@@ -225,8 +239,12 @@ export class Lookup {
           launchpad: code === 'protocol-verified' ? null : lp?.name ?? null,
           status: code === 'protocol-verified' ? 'unlisted' : code === 'observed-platform' ? 'observed' : 'confirmed',
         } : null,
-        tokensAnnounced: fstats?.births ?? null, statsWindowBlocks: chain.statsWindowBlocks, firstSeenBlock: fstats?.firstBlock ?? null,
-        firstSeenAgoSec: fstats?.firstBlock && head ? Math.max(0, Math.round(((head - fstats.firstBlock) * chain.blockTimeMs) / 1000)) : null,
+        // silent factories announce nothing: report what they made instead
+        silent: Boolean(silentMaker),
+        tokensMade: silentMaker?.tokensMade ?? null, topNames: silentMaker?.topNames ?? null,
+        tokensAnnounced: silentMaker ? null : fstats?.births ?? null, statsWindowBlocks: chain.statsWindowBlocks,
+        firstSeenBlock: silentMaker?.firstBlock ?? fstats?.firstBlock ?? null,
+        firstSeenAgoSec: (silentMaker?.firstBlock ?? fstats?.firstBlock) && head ? Math.max(0, Math.round(((head - (silentMaker?.firstBlock ?? fstats.firstBlock)) * chain.blockTimeMs) / 1000)) : null,
       } : null,
       birth: row.birth_tx ? {
         block: row.birth_block, tx: row.birth_tx, source: row.birth_source,
@@ -401,6 +419,26 @@ export class Lookup {
         sampleTokens: this.sql.sampleTokens.all(chain.id, p.e.emitter, since).map((r) => r.token),
       };
     });
+    // silent factories: emit no creation event, so the event-based grouping above never sees them.
+    // Found instead from birth facts: the deployer called the contract and the first mint went to it.
+    for (const m of this.store.q.silentMakers.all(chain.id, since)) {
+      if (reg.factoryOf.has(m.maker) || reg.companionOf.has(m.maker)) continue;
+      if (systems.some((s) => s.emitter === m.maker || s.coEmitters.some((c) => c.address === m.maker))) continue;
+      const age = this.store.q.getAge.get(chain.id, m.maker);
+      const ageKnown = Boolean(age);
+      const firstActivity = ageKnown ? Math.min(age.first_log_block, m.first_block) : null;
+      systems.push({
+        emitter: m.maker, coEmitters: [], status: 'new', silent: true,
+        tokensAnnounced: m.n, alreadyAttributed: 0, templatePurity: m.templates ? Number((1 / m.templates).toFixed(3)) : null,
+        eventTypes: 0, topEvents: [], distinctNames: m.names,
+        firstSeenBlock: m.first_block, lastSeenBlock: m.last_block, firstSeenAgoSec: ago(m.first_block), lastSeenAgoSec: ago(m.last_block),
+        seenFromIndexStart: indexStart !== null && m.first_block <= indexStart + hourBlocks,
+        firstActivityBlock: firstActivity, firstActivityAgoSec: ago(firstActivity), ageKnown,
+        makerShare: 1, // by construction: every counted token was called-into and minted to this contract
+        mechanismTopic: null,
+        sampleTokens: this.store.db.prepare('SELECT address FROM tokens WHERE chain_id = ? AND mint_to = ? AND tx_to = ? ORDER BY birth_block DESC LIMIT 5').all(chain.id, m.maker, m.maker).map((r) => r.address),
+      });
+    }
     // a factory that rotates addresses: several systems, one creation event
     const byMech = new Map();
     for (const s of systems) if (s.mechanismTopic && (s.status === 'new' || s.status === 'look-alike')) (byMech.get(s.mechanismTopic) ?? byMech.set(s.mechanismTopic, []).get(s.mechanismTopic)).push(s.emitter);
