@@ -99,7 +99,7 @@ export function createServer({ lookup, log = console }) {
         if (resource === 'stocks') {
           const n = Number.parseInt(url.searchParams.get('limit') ?? '50', 10);
           const stocks = lookup.stocks(chainId, { limit: Number.isFinite(n) ? n : 50 });
-          return send(res, 200, { stocks, open: stocks.filter((s) => s.open).length }, { 'cache-control': 'public, max-age=10' });
+          return send(res, 200, { stocks, open: stocks.filter((s) => s.open === true).length }, { 'cache-control': 'public, max-age=10' });
         }
         if (resource === 'launchpads') return send(res, 200, { launchpads: lookup.launchpads(chainId) }, { 'cache-control': 'public, max-age=60' });
       }

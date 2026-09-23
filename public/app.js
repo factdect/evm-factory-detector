@@ -160,14 +160,16 @@
           const tr = el('tr', {},
             el('td', {}, el('strong', { text: st.symbol || '(no symbol)' }), el('div', { class: 'sub', text: (st.name || '').replace(/\s*•\s*Robinhood Token\s*$/, '') }), el('div', { class: 'hex', text: short(st.address) })),
             el('td', { class: 'num', text: ago(st.addedAgoSec) ?? num(st.addedBlock) }),
-            el('td', { class: 'num', text: num(st.pairsLaunched) }),
-            el('td', {}, st.open ? tag('Open pair', 'ok') : el('div', {}, el('strong', { text: first?.symbol || short(first?.address) }), el('div', { class: 'sub', text: [first?.launchpad ?? 'unlisted launcher', dur(first?.secondsAfterListing)].filter(Boolean).join(' · ') }))),
+            el('td', { class: 'num', text: st.countComplete ? num(st.pairsLaunched) : `${num(st.pairsLaunched)}+` }),
+            el('td', {}, st.open === true ? tag('Open pair', 'ok')
+              : !st.countComplete && !first ? el('span', { class: 'sub', text: 'listed before this index: earlier launches not tracked' })
+              : el('div', {}, el('strong', { text: first?.symbol || short(first?.address) }), el('div', { class: 'sub', text: [first?.launchpad ?? 'unlisted launcher', st.countComplete ? dur(first?.secondsAfterListing) : 'first seen by this index, may not be the first launch'].filter(Boolean).join(' · ') }))),
           );
-          if (st.open) tr.classList.add('open-pair');
+          if (st.open === true) tr.classList.add('open-pair');
           return first ? pickable(tr, first.address) : tr;
         }), 'Scanning the issuer. The full history loads within a few minutes of starting.');
         const note = $('stocks-note');
-        if (note && stocks.length) note.textContent = `${stocks.length} newest stock tokens. ${open} with no launch yet (open pairs, highlighted). Click a row to trace its first launch.`;
+        if (note && stocks.length) note.textContent = `${stocks.length} newest stock tokens. ${open} confirmed open (no launch at all, highlighted). Pairs listed before this index started show a lower-bound count.`;
       } catch { /* stock list is optional: never block the other lists */ }
       const onlyUnlisted = $('unlisted-only')?.checked;
       const { tokens, unlisted } = await api(`/api/v1/recent/${chainId}?limit=25${onlyUnlisted ? '&attributed=false' : ''}`);

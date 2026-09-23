@@ -450,16 +450,24 @@ export class Lookup {
     const head = this.#head(chain.id);
     const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? opts.limit : 50), 300);
     const ago = (b) => (head && b != null ? Math.max(0, Math.round(((head - b) * chain.blockTimeMs) / 1000)) : null);
+    // launches are counted from this index only: for a stock token listed before the index began,
+    // earlier launches on its pair are invisible, so "zero launches" would be a false "open pair"
+    const indexStart = this.sql.indexStart.get(chain.id)?.b ?? null;
     return this.store.q.stocks.all(chain.id, limit).map((s) => {
       const f = s.first_address ? this.store.q.getToken.get(chain.id, s.first_address) : null;
+      const complete = indexStart !== null && s.block >= indexStart;
       return {
         address: s.address, symbol: s.symbol, name: s.name, issuer: s.issuer,
         addedBlock: s.block, addedTx: s.tx, addedAgoSec: ago(s.block),
-        pairsLaunched: s.pairs, open: s.pairs === 0,
+        // countComplete=false: listed before the index, so pairsLaunched is a lower bound
+        pairsLaunched: s.pairs, countComplete: complete,
+        open: complete ? s.pairs === 0 : null,
         firstLaunch: f ? {
           address: f.address, symbol: f.symbol, birthBlock: f.birth_block, birthAgoSec: ago(f.birth_block),
           launchpad: f.launchpad_id ? reg.launchpads.get(f.launchpad_id)?.name ?? f.launchpad_id : null,
-          secondsAfterListing: f.birth_block != null ? Math.round(((f.birth_block - s.block) * chain.blockTimeMs) / 1000) : null,
+          // only meaningful when every launch on the pair is indexed; otherwise the true first may be older
+          secondsAfterListing: complete && f.birth_block != null ? Math.round(((f.birth_block - s.block) * chain.blockTimeMs) / 1000) : null,
+          isTrueFirst: complete,
         } : null,
       };
     });

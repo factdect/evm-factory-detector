@@ -464,13 +464,21 @@ test('stocks: issuer scan verifies the beacon, and lookup shows open pairs vs fi
   assert.equal(rows.length, 1, 'the fake MCD (wrong beacon) is not shown');
   assert.equal(rows[0].symbol, 'QCOM');
   assert.equal(rows[0].pairsLaunched, 1);
-  assert.equal(rows[0].open, false);
-  assert.equal(rows[0].firstLaunch.secondsAfterListing, Math.round((110 - 100) * 100 / 1000));
+  assert.equal(rows[0].open, null, 'no index start known yet: open-ness is not claimed');
+  assert.equal(rows[0].firstLaunch.secondsAfterListing, null, 'index has no birth_refs yet: completeness unknown, so no delay claimed');
   assert.equal(rows[0].firstLaunch.launchpad, 'Doppler protocol');
+  // a stock token listed before the index began: never claimed open, first launch not claimed true-first
+  store.q.addRef.run(4663, '0x' + 'dd'.repeat(20), '0x' + 'ee'.repeat(20), '0x' + '01'.repeat(32), 0, 105); // index starts at 105
+  store.q.putStock.run(4663, '0x' + '44'.repeat(20), 'rh', 'OLD', 'Old • Robinhood Token', 50, '0x' + '03'.repeat(32), 1, 0);
+  const old = lk.stocks(4663).find((r) => r.symbol === 'OLD');
+  assert.deepEqual([old.countComplete, old.open], [false, null], 'pre-index listing: zero launches seen is NOT an open pair');
+  const q = lk.stocks(4663).find((r) => r.symbol === 'QCOM');
+  assert.equal(q.countComplete, false, 'QCOM (listed at 100) also predates index start 105');
+  assert.equal(q.firstLaunch.secondsAfterListing, null, 'no delay claimed when the true first may be missing');
   assert.equal(store.q.stockCount.get(4663).rejected, 1, 'the look-alike is recorded but flagged');
   // second scan is incremental (cursor advanced): no re-insert error, still one shown
   await scanIssuers({ chain, rpc, registry, store, head: 130, maxCalls: 10 });
-  assert.equal(lk.stocks(4663).length, 1);
+  assert.equal(lk.stocks(4663).filter((r) => r.symbol === 'QCOM').length, 1, 're-scan does not duplicate');
 });
 
 test('verdict colors: no unverified or direct-deploy verdict is shown as neutral or safe', async () => {
