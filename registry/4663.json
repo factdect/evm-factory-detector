@@ -1,6 +1,6 @@
 {
   "chainId": 4663,
-  "updated": "2026-09-21",
+  "updated": "2026-09-23",
   "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk.",
   "launchpads": [
     {
@@ -48,6 +48,11 @@
                 "status": "confirmed",
                 "label": "Doppler (Airlock owner)",
                 "source": "Airlock owner() on-chain"
+              },
+              "0xf60633d02690e2a15a54ab919925f3d038df163e": {
+                "launchpad": "bankr",
+                "status": "observed",
+                "source": "Not published by Bankr. On-chain 2026-09-23: this integrator launched musebook and Agrippa, both traded on bankr.bot's terminal; Bankr is a documented Doppler integrator; every sampled token from it carries the 'ba3' address suffix (vanity, like Long's 1e18) and a 100B supply."
               }
             }
           }
@@ -101,6 +106,10 @@
         {
           "address": "0x85f37f74ef2478a770318bc810177a9835911ad7",
           "label": "NoOpGovernanceFactory"
+        },
+        {
+          "address": "0x3be8b97fd0e713b5abe0649fa830223b6b4bc599",
+          "label": "DopplerERC20V1 implementation (every Doppler token is a 44-byte clone of it)"
         }
       ]
     },
@@ -485,6 +494,29 @@
           ]
         }
       ]
+    },
+    {
+      "id": "bankr",
+      "name": "Bankr",
+      "url": "https://bankr.bot",
+      "stack": "Launches through the Doppler protocol (Airlock). Identified on-chain by its integrator address; not published by Bankr.",
+      "events": [],
+      "contracts": []
+    }
+  ],
+  "quoteIssuers": [
+    {
+      "id": "robinhood-stock-tokens",
+      "label": "Robinhood stock tokens",
+      "factory": "0x4783c67b63de2b358ac5951a7d41f47a38f3c046",
+      "topic0": "0xd9b0c6a1c0de228715ad0fa09f3259686ee84f8cc675e03ef7e47a9cdafa76d6",
+      "data": [
+        "address",
+        "string",
+        "string"
+      ],
+      "beacon": "0xe10b6f6b275de231345c20d14ab812db62151b00",
+      "source": "On-chain 2026-09-22: every '\u2022 Robinhood Token' was created by deploy(bytes32,string,string) on this factory (caller 0x5516b3451d4d6c9f63353fe7bc9537477ecce000) and is a beacon proxy on this beacon. A token counts only if its beacon slot matches: name-alikes (e.g. an 'MCD \u2022 Robinhood Token' on another beacon) are rejected."
     }
   ]
 }

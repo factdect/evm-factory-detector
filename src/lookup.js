@@ -1,5 +1,5 @@
 // Turns index rows into the public JSON. The lookup page renders exactly this JSON.
-import { INFRA_ADDRESSES, INFRA_TOPICS } from './attribution.js';
+import { INFRA_ADDRESSES, INFRA_TOPICS, platformCall, resolvePlatform } from './attribution.js';
 import { BirthRecorder } from './births.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { findCreation } from './explorer.js';
@@ -15,7 +15,7 @@ const VERDICTS = {
   'discovered-first': ['First sighting', 'The contract that announced this token has announced no other token in this index. A one-off deployer and a brand-new factory look identical until the second token.'],
   'discovered-silent': ['No factory event', 'The contract appeared and minted in one transaction, and no other contract announced it. Deployed directly, or by a factory that emits nothing.'],
   'bytecode-cluster': ['Bytecode match only', 'The birth transaction is not indexed. The bytecode matches a template used by a known launchpad, which shows the template, not who deployed it.'],
-  none: ['No birth record', 'This index holds no birth transaction for the token: it was created before indexing started, or in the last few seconds. With an explorer key configured, older tokens are traced on demand.'],
+  none: ['No birth record', 'This index holds no birth transaction for the token, and no launch protocol has an on-chain record of it either: it was deployed directly, or by a factory this registry does not know. With an explorer key configured, older tokens are traced on demand.'],
 };
 
 class TtlCache {
@@ -140,7 +140,46 @@ export class Lookup {
     return {
       key: fpKey, size,
       launchpads: rows.map((r) => ({ id: r.launchpad_id || null, name: r.launchpad_id ? reg.launchpads.get(r.launchpad_id)?.name ?? r.launchpad_id : 'unattributed', tokens: r.n, share: Number((r.n / size).toFixed(3)) })),
+      // a template owned by a permissionless protocol is shared by every app on it: name the protocol,
+      // and make clear the app shares describe the template's users, not who launched *this* token
+      template: this.#templateOwner(reg, fpKey),
     };
+  }
+
+  /**
+   * For a token with no indexed birth, query each protocol factory that keeps per-asset data
+   * (Doppler Airlock: getAssetData). One eth_call per protocol; no explorer key, no birth tx.
+   * Returns attribution columns to merge into the row, or {} when no protocol knows the token.
+   */
+  async #liveProtocol(chain, addr) {
+    const reg = this.registries.get(chain.id);
+    const rpc = this.rpcs.get(chain.id);
+    if (!rpc) return {};
+    for (const spec of reg.platformSpecs ?? []) {
+      try {
+        const match = { platform: spec.platform, factory: spec.factory, launchpadId: spec.launchpadId };
+        const [res] = await rpc.batch([platformCall(match, addr)], { priority: true });
+        const data = res?.result ?? '0x';
+        if (data.length < 66) continue;
+        const r = resolvePlatform(match, data);
+        if (r.platform === 'unreadable') continue;
+        // numeraire (word 0) all-zero means the protocol has no record of this asset
+        if (/^0x0{64}/.test(data.slice(0, 66).replace('0x', '0x'))) continue;
+        return { launchpad_id: r.launchpadId, confidence: r.confidence, factory: spec.factory, factory_label: spec.emitters.get(spec.factory)?.label ?? null,
+          event_sig: spec.signature, platform: r.platform, attribution_source: 'live-protocol-call' };
+      } catch { /* try the next protocol */ }
+    }
+    return {};
+  }
+
+  #templateOwner(reg, fpKey) {
+    if (!fpKey?.startsWith('proxy:')) return null;
+    const impl = fpKey.slice(6);
+    const c = reg.companionOf.get(impl);
+    if (!c) return null;
+    const lp = reg.launchpads.get(c.launchpadId);
+    const isProtocol = (reg.platformSpecs ?? []).some((s) => s.launchpadId === c.launchpadId);
+    return { launchpadId: c.launchpadId, name: lp?.name ?? c.launchpadId, label: c.label, sharedByApps: isProtocol };
   }
 
   #shape(chain, row, { adhoc = false } = {}) {
@@ -160,7 +199,7 @@ export class Lookup {
     else if (code === 'discovered' && primary.births < 2) code = 'discovered-first';
     if (code === 'none' && cluster) {
       const top = cluster.launchpads[0];
-      if (top?.id && top.share >= 0.9 && top.tokens >= 5) { code = 'bytecode-cluster'; likely = { id: top.id, name: top.name, share: top.share, tokens: top.tokens }; }
+      if (top?.id && top.share >= 0.9 && top.tokens >= 5 && !cluster.template?.sharedByApps) { code = 'bytecode-cluster'; likely = { id: top.id, name: top.name, share: top.share, tokens: top.tokens }; }
     }
     const [headline, detail] = VERDICTS[code] ?? VERDICTS.none;
     const factoryAddr = row.factory ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
@@ -198,6 +237,7 @@ export class Lookup {
         size: row.code_size, kind: row.fp_kind, implementation: row.impl,
         upgradeable: row.upgradeable === null || row.upgradeable === undefined ? null : Boolean(row.upgradeable),
         exactHash: row.fp_exact, cluster,
+        attributionSource: row.attribution_source ?? (row.birth_tx ? 'indexed-birth' : null),
         note: row.fp_kind === 'minimal-proxy'
           ? 'Minimal clone: the implementation address is hardcoded in the bytecode and cannot be changed. Generic scanners still report it as a proxy.'
           : row.fp_kind === 'eip1967-proxy' ? 'EIP-1967 proxy: whoever controls the admin or implementation can change the logic.' : null,
@@ -219,7 +259,14 @@ export class Lookup {
     if (!chain) return { status: 404, body: { error: 'unknown_chain', message: `Chain ${chainId} is not configured here.`, chains: [...this.chains.keys()] } };
     const addr = address.toLowerCase();
     const row = this.store.q.getToken.get(chain.id, addr);
-    if (row) return { status: 200, body: this.#shape(chain, row) };
+    if (row) {
+      // indexed but never attributed (born before the index, or a silent birth): a protocol may still know it
+      if (!row.launchpad_id && (row.confidence === 'none' || row.confidence === 'discovered')) {
+        const live = await this.#liveProtocol(chain, addr);
+        if (live.launchpad_id) return { status: 200, body: this.#shape(chain, { ...row, ...live }) };
+      }
+      return { status: 200, body: this.#shape(chain, row) };
+    }
 
     const key = `${chain.id}:${addr}`;
     const cached = this.adhocCache.get(key);
@@ -242,6 +289,8 @@ export class Lookup {
     if (fp.kind === 'empty') return { status: 404, body: { error: 'not_a_contract', message: `No contract at ${addr} on ${chain.name}.` } };
     // Not persisted: a public endpoint should not let strangers grow the database.
     const row = { address: addr, confidence: 'none', ...fpColumns(fp), ...meta };
+    // No birth record, but a permissionless protocol keeps its own asset registry on-chain: ask it.
+    Object.assign(row, await this.#liveProtocol(chain, addr));
     return { status: 200, body: this.#shape(chain, row, { adhoc: true }) };
   }
 
@@ -389,6 +438,33 @@ export class Lookup {
     return { list: all.slice(0, limit), total: all.length, pendingAgeCheck };
   }
 
+  /**
+   * New quote tokens from known issuers (Robinhood stock tokens), newest first. For each: how many
+   * launches already use it as their pair, and which launch was first. pairs == 0 means the pair
+   * is still open: nobody has launched against it yet.
+   */
+  stocks(chainId, opts = {}) {
+    const chain = this.chain(chainId);
+    if (!chain) return null;
+    const reg = this.registries.get(chain.id);
+    const head = this.#head(chain.id);
+    const limit = Math.min(Math.max(1, Number.isFinite(opts.limit) ? opts.limit : 50), 300);
+    const ago = (b) => (head && b != null ? Math.max(0, Math.round(((head - b) * chain.blockTimeMs) / 1000)) : null);
+    return this.store.q.stocks.all(chain.id, limit).map((s) => {
+      const f = s.first_address ? this.store.q.getToken.get(chain.id, s.first_address) : null;
+      return {
+        address: s.address, symbol: s.symbol, name: s.name, issuer: s.issuer,
+        addedBlock: s.block, addedTx: s.tx, addedAgoSec: ago(s.block),
+        pairsLaunched: s.pairs, open: s.pairs === 0,
+        firstLaunch: f ? {
+          address: f.address, symbol: f.symbol, birthBlock: f.birth_block, birthAgoSec: ago(f.birth_block),
+          launchpad: f.launchpad_id ? reg.launchpads.get(f.launchpad_id)?.name ?? f.launchpad_id : null,
+          secondsAfterListing: f.birth_block != null ? Math.round(((f.birth_block - s.block) * chain.blockTimeMs) / 1000) : null,
+        } : null,
+      };
+    });
+  }
+
   launchpads(chainId) {
     const chain = this.chain(chainId);
     if (!chain) return null;
@@ -414,6 +490,7 @@ export class Lookup {
         indexer: ix ? { head: ix.head, nextBlock: ix.next, lagBlocks: ix.lag, discovery: ix.discovery, lastError: ix.lastError, platformsResolved: ix.platformsResolved ?? 0, agesProbed: ix.agesProbed ?? 0 }
           : cur ? { head: cur.head, nextBlock: cur.next_block, lagBlocks: cur.head ? cur.head - cur.next_block : null, discovery: null, lastError: null } : null,
         explorerLookups: Boolean(process.env.ETHERSCAN_API_KEY || process.env.BLOCKSCOUT_API_KEY),
+        stockTokens: (() => { const s = this.store.q.stockCount.get(c.id); return { tracked: (s.n ?? 0) - (s.rejected ?? 0), rejectedLookAlikes: s.rejected ?? 0 }; })(),
       };
     });
   }

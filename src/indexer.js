@@ -12,6 +12,7 @@
 
 import { matchKnownEvent, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { probePendingAges } from './age.js';
+import { scanIssuers } from './stocks.js';
 import { BirthRecorder, probePendingPlatforms } from './births.js';
 import { getLogsRange, hex, isStateUnavailable } from './rpc.js';
 
@@ -70,8 +71,14 @@ export class Indexer {
   async maintain(head) {
     const { chain, store } = this;
     const now = Date.now();
-    this.idleUntil ??= { platforms: 0, ages: 0 };
+    this.idleUntil ??= { platforms: 0, ages: 0, stocks: 0 };
     try {
+      // new quote tokens first: this is the time-sensitive one
+      if (now >= this.idleUntil.stocks && this.registry.quoteIssuers?.length) {
+        const r = await scanIssuers({ chain, rpc: this.rpc, registry: this.registry, store, head, maxCalls: 4 });
+        if (r.calls <= 1) this.idleUntil.stocks = now + 15_000; // caught up: look again in 15 s
+        this.status.stocksFound = (this.status.stocksFound ?? 0) + r.found;
+      }
       if (now >= this.idleUntil.platforms) {
         const n = await probePendingPlatforms({ chain, rpc: this.rpc, registry: this.registry, store, max: 24 });
         if (!n) this.idleUntil.platforms = now + 60_000;

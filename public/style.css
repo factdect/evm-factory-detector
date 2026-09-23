@@ -77,6 +77,8 @@ td { padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); vertical-ali
 td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 tr.pick { cursor: pointer; } tr.pick:hover td { background: rgba(255,255,255,.35); }
 tr.unlisted td { background: rgba(214,158,46,.13); }
+tr.open-pair td { background: rgba(15,123,108,.10); }
+tr.open-pair td:first-child { box-shadow: inset 3px 0 0 #0f7b6c; }
 tr.unlisted:hover td { background: rgba(214,158,46,.22); }
 tr.unlisted td:first-child { box-shadow: inset 3px 0 0 var(--warn, #b7791f); }
 .row-between { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

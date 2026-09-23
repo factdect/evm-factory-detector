@@ -14,7 +14,9 @@
   const plural = (n, one, many) => `${Number(n).toLocaleString('en-US')} ${Number(n) === 1 ? one : many}`;
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString('en-US'));
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'flat', 'bytecode-cluster': 'warn', none: 'flat' };
+  // Only a verified/observed launchpad is 'ok' (teal). Everything unproven is 'warn' (amber);
+  // a look-alike event is 'bad' (red). A bare direct deploy is never neutral.
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
   const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
@@ -74,8 +76,14 @@
     const pattern = b.kind === 'minimal-proxy' ? `${b.size}-byte clone of ${short(b.implementation)}` : `${num(b.size)}-byte ${b.kind === 'eip1967-proxy' ? 'upgradeable proxy' : 'contract'}`;
     // the cluster counts this token too when it is indexed
     const others = Math.max(0, (b.cluster?.size ?? 0) - (d.indexedAt ? 1 : 0));
-    const shared = others ? `Same template as ${plural(others, 'other indexed token', 'other indexed tokens')}` : 'No other indexed token uses this template';
+    const tpl = b.cluster?.template;
+    // a protocol-owned template is shared by every app on that protocol: say whose it is, and that
+    // the app split describes the template's users, never who launched this token
+    const shared = tpl?.sharedByApps
+      ? `${tpl.name} token template (${tpl.label || 'shared implementation'}), also used by ${plural(others, 'other indexed token', 'other indexed tokens')} across ${b.cluster.launchpads.filter((l) => l.id).length} apps. The split of those apps says nothing about which app launched this one`
+      : others ? `Same template as ${plural(others, 'other indexed token', 'other indexed tokens')}` : 'No other indexed token uses this template';
     field(dl, 'Pattern', pattern, { note: [shared, b.note].filter(Boolean).join('. ') });
+    if (b.attributionSource === 'live-protocol-call') field(dl, 'Resolved', 'live from the protocol contract', { note: 'The birth transaction is not indexed; the launch protocol keeps its own on-chain record of this asset, and that is what the verdict is based on.' });
 
     const stamp = $('stamp');
     stamp.textContent = d.verdict.headline;
@@ -144,11 +152,28 @@
       return tr;
     };
     try {
+      try {
+        const { stocks, open } = await api(`/api/v1/stocks/${chainId}?limit=30`);
+        const dur = (sec) => (sec == null ? '' : sec < 120 ? `${sec}s after listing` : sec < 7200 ? `${Math.round(sec / 60)} min after listing` : sec < 172800 ? `${Math.round(sec / 3600)} h after listing` : `${Math.round(sec / 86400)} days after listing`);
+        table($('stocks'), ['Stock token', 'Added', 'Pairs launched', 'First launch'], stocks.map((st) => {
+          const first = st.firstLaunch;
+          const tr = el('tr', {},
+            el('td', {}, el('strong', { text: st.symbol || '(no symbol)' }), el('div', { class: 'sub', text: (st.name || '').replace(/\s*•\s*Robinhood Token\s*$/, '') }), el('div', { class: 'hex', text: short(st.address) })),
+            el('td', { class: 'num', text: ago(st.addedAgoSec) ?? num(st.addedBlock) }),
+            el('td', { class: 'num', text: num(st.pairsLaunched) }),
+            el('td', {}, st.open ? tag('Open pair', 'ok') : el('div', {}, el('strong', { text: first?.symbol || short(first?.address) }), el('div', { class: 'sub', text: [first?.launchpad ?? 'unlisted launcher', dur(first?.secondsAfterListing)].filter(Boolean).join(' · ') }))),
+          );
+          if (st.open) tr.classList.add('open-pair');
+          return first ? pickable(tr, first.address) : tr;
+        }), 'Scanning the issuer. The full history loads within a few minutes of starting.');
+        const note = $('stocks-note');
+        if (note && stocks.length) note.textContent = `${stocks.length} newest stock tokens. ${open} with no launch yet (open pairs, highlighted). Click a row to trace its first launch.`;
+      } catch { /* stock list is optional: never block the other lists */ }
       const onlyUnlisted = $('unlisted-only')?.checked;
       const { tokens, unlisted } = await api(`/api/v1/recent/${chainId}?limit=25${onlyUnlisted ? '&attributed=false' : ''}`);
       const rowOf = (t) => { const tr = pickable(el('tr', {},
         el('td', {}, el('strong', { text: t.symbol || '(no symbol)' }), el('div', { class: 'hex', text: short(t.address) })),
-        el('td', {}, t.launchpad ? tag(t.launchpad, TONE[t.confidence] ?? 'flat') : tag(t.confidence === 'discovered' ? 'Unlisted' : 'Unverified', t.confidence === 'discovered' ? 'warn' : 'bad')),
+        el('td', {}, t.launchpad ? tag(t.launchpad, TONE[t.confidence] ?? 'warn') : tag((t.confidence || '').startsWith('discovered') ? 'Unlisted' : t.confidence === 'unverified-emitter' ? 'Look-alike' : 'Unverified', t.confidence === 'unverified-emitter' ? 'bad' : 'warn')),
         el('td', { class: 'num', text: num(t.birthBlock) }),
         el('td', { text: t.bytecodeKind === 'minimal-proxy' ? `${t.codeSize}-byte clone` : `${num(t.codeSize)} bytes` }),
       ), t.address); if (t.unlisted) tr.classList.add('unlisted'); return tr; };

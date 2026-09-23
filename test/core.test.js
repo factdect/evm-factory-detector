@@ -431,3 +431,93 @@ test('recent: flags unlisted tokens and can return only them', () => {
   assert.deepEqual(only.map((t) => t.address), ['0x' + '22'.repeat(20)]);
   assert.ok(only.every((t) => t.unlisted));
 });
+
+test('stocks: issuer scan verifies the beacon, and lookup shows open pairs vs first launch', async () => {
+  const { scanIssuers, decodeIssuerLog } = await import('../src/stocks.js');
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', slug: 't', blockTimeMs: 100, statsWindowBlocks: 1_000_000, logsChunk: 2000, addrLogsSpan: 2000, explorer: {} };
+  const ISSUER = { id: 'rh', factory: '0x' + '11'.repeat(20), topic0: '0x' + 'aa'.repeat(32), beacon: '0x' + 'be'.repeat(20), data: ['address', 'string', 'string'] };
+  const registry = { ...reg, quoteIssuers: [ISSUER] };
+  const enc = (addr, name, sym) => {
+    const w = (h) => h.replace('0x', '').padStart(64, '0');
+    const off = w('0x60'); const nOff = w('0xa0');
+    const str = (v) => { const hexs = Buffer.from(v, 'utf8').toString('hex'); return w('0x' + (v.length).toString(16)) + hexs.padEnd(64, '0'); };
+    return '0x' + w(addr) + off + nOff + str(name) + str(sym);
+  };
+  const REAL = '0x' + '22'.repeat(20), FAKE = '0x' + '33'.repeat(20);
+  const logs = [
+    { address: ISSUER.factory, topics: [ISSUER.topic0], data: enc(REAL, 'Qualcomm • Robinhood Token', 'QCOM'), blockNumber: '0x64', transactionHash: '0x' + '01'.repeat(32) },
+    { address: ISSUER.factory, topics: [ISSUER.topic0], data: enc(FAKE, "McDonald's • Robinhood Token", 'MCD'), blockNumber: '0x65', transactionHash: '0x' + '02'.repeat(32) },
+  ];
+  const beacon = (t) => (t.toLowerCase() === REAL ? '0x' + '00'.repeat(12) + 'be'.repeat(20) : '0x' + '00'.repeat(12) + 'cc'.repeat(20));
+  const rpc = { call: async (m, p) => {
+    if (m === 'eth_getLogs') { const from = parseInt(p[0].fromBlock, 16), to = parseInt(p[0].toBlock, 16); return logs.filter((l) => { const b = parseInt(l.blockNumber, 16); return b >= from && b <= to; }); }
+    if (m === 'eth_getStorageAt') return beacon(p[0]);
+    throw new Error('unexpected ' + m);
+  } };
+  await scanIssuers({ chain, rpc, registry, store, head: 130, maxCalls: 10 });
+  // a launch that pairs with the real stock token
+  store.saveToken({ chain_id: 4663, address: '0x' + 'dd'.repeat(20), confidence: 'verified', launchpad_id: 'doppler', birth_block: 110, birth_tx: '0x1', birth_source: 'x', event_fields: JSON.stringify({ numeraire: REAL }) });
+
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, registry]]), store });
+  const rows = lk.stocks(4663);
+  assert.equal(rows.length, 1, 'the fake MCD (wrong beacon) is not shown');
+  assert.equal(rows[0].symbol, 'QCOM');
+  assert.equal(rows[0].pairsLaunched, 1);
+  assert.equal(rows[0].open, false);
+  assert.equal(rows[0].firstLaunch.secondsAfterListing, Math.round((110 - 100) * 100 / 1000));
+  assert.equal(rows[0].firstLaunch.launchpad, 'Doppler protocol');
+  assert.equal(store.q.stockCount.get(4663).rejected, 1, 'the look-alike is recorded but flagged');
+  // second scan is incremental (cursor advanced): no re-insert error, still one shown
+  await scanIssuers({ chain, rpc, registry, store, head: 130, maxCalls: 10 });
+  assert.equal(lk.stocks(4663).length, 1);
+});
+
+test('verdict colors: no unverified or direct-deploy verdict is shown as neutral or safe', async () => {
+  const src = await import('node:fs').then((fs) => fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8'));
+  const line = src.match(/const TONE = (\{[^}]*\});/)[1];
+  const TONE = Function(`return ${line}`)();
+  // teal ('ok') is reserved for a real, verified/observed launchpad only
+  const mayBeOk = new Set(['verified', 'observed-emitter', 'observed-platform']);
+  for (const [code, tone] of Object.entries(TONE)) {
+    if (tone === 'ok') assert.ok(mayBeOk.has(code), `${code} must not be green`);
+    assert.notEqual(tone, 'flat', `${code} must not render as neutral — unverified is at least a caution`);
+  }
+  // the specific regression: a bare direct deploy
+  assert.equal(TONE['discovered-silent'], 'warn');
+  assert.equal(TONE['none'], 'warn');
+});
+
+test('live protocol resolution: an unindexed Doppler token is attributed from getAssetData, and a shared template never names an app', async () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const w = (a) => a.replace('0x', '').padStart(64, '0');
+  const asset = (integ) => '0x' + [w('0x0f17206447090e464c277571124dd2688e48aea9'), w('0x0'), w('0x0'), w('0x0'), w('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544'), w('0x0'), w('0x0'), w('0x1'), w('0x1'), w(integ)].join('');
+  const BANKR = '0xf60633d02690e2a15a54ab919925f3d038df163e', NOBODY = '0x' + 'ab'.repeat(20);
+  const TOK_B = '0x' + '51'.repeat(20), TOK_X = '0x' + '52'.repeat(20), TOK_N = '0x' + '53'.repeat(20);
+  const clone = '0x363d3d373d3d3d363d733be8b97fd0e713b5abe0649fa830223b6b4bc5995af43d82803e903d91602b57fd5bf3';
+  const rpc = {
+    batch: async (calls) => calls.map((c) => {
+      const t = '0x' + c.params[0].data.slice(-40);
+      if (t === TOK_B) return { result: asset(BANKR) };
+      if (t === TOK_X) return { result: asset(NOBODY) };
+      return { result: '0x' + '0'.repeat(640) }; // protocol has no record: all-zero
+    }),
+    call: async (m, p) => (m === 'eth_getCode' ? clone : m === 'eth_blockNumber' ? '0x64' : '0x'),
+  };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 101, 100, 0);
+  // simulate "indexed before attribution existed": rows with confidence none
+  for (const t of [TOK_B, TOK_X, TOK_N]) store.saveToken({ chain_id: 4663, address: t, confidence: 'none', fp_key: 'proxy:0x3be8b97fd0e713b5abe0649fa830223b6b4bc599', fp_kind: 'minimal-proxy', code_size: 44 });
+  // give the cluster a Long-heavy population, like production
+  for (let i = 0; i < 9; i++) store.saveToken({ chain_id: 4663, address: '0x' + (0x60 + i).toString(16).padStart(40, '0'), confidence: 'observed-emitter', launchpad_id: 'long-xyz', platform: '0x92d435c96e63c43e12d6d0ab28f6b0b04072f765', fp_key: 'proxy:0x3be8b97fd0e713b5abe0649fa830223b6b4bc599', fp_kind: 'minimal-proxy', code_size: 44, birth_block: 5, birth_tx: '0x1', birth_source: 'x' });
+
+  const b = (await lk.token(4663, TOK_B)).body;
+  assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.integrator, b.bytecode.attributionSource], ['observed-platform', 'bankr', BANKR, 'live-protocol-call']);
+  const x = (await lk.token(4663, TOK_X)).body;
+  assert.deepEqual([x.verdict.code, x.launchpad.id, x.factory.platform.status], ['protocol-verified', 'doppler', 'unlisted']);
+  const n = (await lk.token(4663, TOK_N)).body;
+  assert.equal(n.verdict.code, 'none', 'no protocol record: stays none');
+  assert.equal(n.likelyLaunchpad, null, 'a Long-heavy shared template must NOT make the verdict guess Long');
+  assert.deepEqual([n.bytecode.cluster.template.name, n.bytecode.cluster.template.sharedByApps], ['Doppler protocol', true]);
+});

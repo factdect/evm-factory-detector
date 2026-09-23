@@ -33,6 +33,18 @@ CREATE INDEX IF NOT EXISTS refs_pair ON birth_refs (chain_id, emitter, topic0);
 CREATE INDEX IF NOT EXISTS refs_emitter_block ON birth_refs (chain_id, emitter, block);
 CREATE INDEX IF NOT EXISTS refs_block ON birth_refs (chain_id, block);
 -- first on-chain activity of an announcing contract, found by an address-filtered getLogs lookback
+-- quote tokens a known issuer created (Robinhood stock tokens), with the proof we checked
+CREATE TABLE IF NOT EXISTS stock_tokens (
+  chain_id INTEGER NOT NULL, address TEXT NOT NULL, issuer TEXT NOT NULL,
+  symbol TEXT, name TEXT, block INTEGER NOT NULL, tx TEXT NOT NULL,
+  beacon_ok INTEGER NOT NULL, seen_at INTEGER NOT NULL,
+  PRIMARY KEY (chain_id, address)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS stock_tokens_block ON stock_tokens (chain_id, block DESC);
+CREATE TABLE IF NOT EXISTS issuer_cursor (
+  chain_id INTEGER NOT NULL, issuer TEXT NOT NULL, next_block INTEGER NOT NULL,
+  PRIMARY KEY (chain_id, issuer)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS emitter_age (
   chain_id INTEGER NOT NULL, address TEXT NOT NULL, first_log_block INTEGER NOT NULL, lookback_from INTEGER NOT NULL, probed_at INTEGER NOT NULL,
   PRIMARY KEY (chain_id, address)
@@ -93,6 +105,16 @@ export function openDb(file = process.env.DB_PATH || './data/factory.db') {
     // tokens attributed through a protocol event whose launching app has not been read yet
     platformPending: db.prepare(`SELECT address, factory, event_sig FROM tokens WHERE chain_id = ? AND platform IS NULL AND factory = ? AND event_sig = ? ORDER BY birth_block DESC LIMIT ?`),
     setPlatform: db.prepare('UPDATE tokens SET platform = ?, launchpad_id = ?, confidence = ?, factory_label = COALESCE(?, factory_label) WHERE chain_id = ? AND address = ?'),
+    getIssuerCursor: db.prepare('SELECT next_block FROM issuer_cursor WHERE chain_id = ? AND issuer = ?'),
+    setIssuerCursor: db.prepare('INSERT OR REPLACE INTO issuer_cursor (chain_id, issuer, next_block) VALUES (?, ?, ?)'),
+    putStock: db.prepare(`INSERT OR IGNORE INTO stock_tokens (chain_id, address, issuer, symbol, name, block, tx, beacon_ok, seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+    // newest stock tokens with how many launches already use each one as their pair, and the first of them
+    stocks: db.prepare(`SELECT s.*,
+        (SELECT COUNT(*) FROM tokens t WHERE t.chain_id = s.chain_id AND json_extract(t.event_fields, '$.numeraire') = s.address) AS pairs,
+        (SELECT t.address FROM tokens t WHERE t.chain_id = s.chain_id AND json_extract(t.event_fields, '$.numeraire') = s.address ORDER BY t.birth_block ASC LIMIT 1) AS first_address
+      FROM stock_tokens s WHERE s.chain_id = ? AND s.beacon_ok = 1 ORDER BY s.block DESC LIMIT ?`),
+    stockCount: db.prepare('SELECT COUNT(*) AS n, SUM(beacon_ok = 0) AS rejected FROM stock_tokens WHERE chain_id = ?'),
     getAge: db.prepare('SELECT first_log_block, lookback_from FROM emitter_age WHERE chain_id = ? AND address = ?'),
     putAge: db.prepare('INSERT OR REPLACE INTO emitter_age (chain_id, address, first_log_block, lookback_from, probed_at) VALUES (?, ?, ?, ?, ?)'),
     // serial announcers we have not dated yet, busiest first

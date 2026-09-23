@@ -96,6 +96,11 @@ export function createServer({ lookup, log = console }) {
           const r = lookup.candidates(chainId, opts);
           return send(res, 200, { total: r.total, pendingAgeCheck: r.pendingAgeCheck, returned: r.list.length, candidates: r.list }, { 'cache-control': 'public, max-age=10' });
         }
+        if (resource === 'stocks') {
+          const n = Number.parseInt(url.searchParams.get('limit') ?? '50', 10);
+          const stocks = lookup.stocks(chainId, { limit: Number.isFinite(n) ? n : 50 });
+          return send(res, 200, { stocks, open: stocks.filter((s) => s.open).length }, { 'cache-control': 'public, max-age=10' });
+        }
         if (resource === 'launchpads') return send(res, 200, { launchpads: lookup.launchpads(chainId) }, { 'cache-control': 'public, max-age=60' });
       }
       return send(res, 404, { error: 'not_found', endpoints: ['/api/v1/chains', '/api/v1/token/:chainId/:address', '/api/v1/recent/:chainId', '/api/v1/candidates/:chainId', '/api/v1/launchpads/:chainId', '/health'] });

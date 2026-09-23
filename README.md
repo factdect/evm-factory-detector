@@ -17,6 +17,12 @@ Trading terminals label launchpad tokens from a hand-maintained allowlist of fac
 
 Some creation events belong to a permissionless *protocol*, not an app. Doppler's Airlock (canonical on Robinhood Chain, per docs.doppler.lol) emits the same `Create` for Long.xyz and for anyone else who calls it. The launching app is stored per asset (`getAssetData(asset).integrator`), so the registry lets an event carry a `platform` resolver: the indexer reads the integrator at record time, maps known integrators to their launchpad, and labels the rest `protocol-verified` ("Doppler, unlisted app"). Rows indexed before a resolver existed are re-checked in idle time. On 2026-09-21 about a third of Doppler launches on Robinhood Chain came from integrators other than Long's.
 
+### Tokens born before the index
+
+A token with no indexed birth is not a dead end. Permissionless protocols keep their own per-asset record on-chain (Doppler: `Airlock.getAssetData`), so the lookup asks each registered protocol factory live, one `eth_call` each, and attributes the token from the integrator it finds. No explorer key is needed for that; the key only adds tracing for tokens no protocol knows. The response says how the verdict was obtained in `bytecode.attributionSource` (`indexed-birth` or `live-protocol-call`).
+
+A bytecode template owned by a protocol (the DopplerERC20V1 clone) is shared by every app on that protocol, so the cluster names the protocol (`cluster.template`) and the app split is presented as the template's users, never as a guess about who launched the token in hand.
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -54,6 +60,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 | --- | --- |
 | `/api/v1/token/:chainId/:address` | Verdict, launchpad, factory (with tokens announced and first-seen age), birth tx, bytecode template, announcers |
 | `/api/v1/recent/:chainId?limit=50` | Newest births |
+| `/api/v1/stocks/:chainId` | New quote tokens from known issuers (Robinhood stock tokens). Each row: when it was added, `pairsLaunched` (how many launches use it as their pair), `open` (true = nobody has launched against it yet), and `firstLaunch` (the first token on that pair, its launchpad, and `secondsAfterListing`). A token counts only if its beacon slot matches the issuer's — name-alikes are rejected. |
 | `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). `firstActivityAgoSec` is the contract's first log on-chain (dated in idle time by an address-filtered getLogs lookback, default 7 days), not when this index first saw it. `makerShare` = share of its tokens whose deployer called it or whose first mint went to it. Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `pool-hook` \| `dex-plumbing` \| …, `sinceHours=24` (first on-chain activity within N hours; undated systems are counted in `pendingAgeCheck`, never guessed), `min=2`, `limit=100`. Response carries `total` beside the page. |
 | `/api/v1/launchpads/:chainId` | Registry with provenance per factory address and indexed counts |
 | `/api/v1/chains` | Configured chains and indexer status (head, lag, discovery on/off) |
