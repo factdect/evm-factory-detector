@@ -16,7 +16,7 @@
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
   // Only a verified/observed launchpad is 'ok' (teal). Everything unproven is 'warn' (amber);
   // a look-alike event is 'bad' (red). A bare direct deploy is never neutral.
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'evidence-pruned': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
   const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
@@ -201,6 +201,21 @@
     }
   }
 
+  // Say so when the index is behind: "newest tokens" from a stalled index are not the newest.
+  async function indexerNote() {
+    const note = $('indexer-note');
+    if (!note) return;
+    try {
+      const c = (await api('/api/v1/chains')).chains.find((x) => x.id === chainId);
+      const ix = c?.indexer;
+      const behind = ix && (ix.stalled || ix.diskFull || (ix.lagSeconds ?? 0) > 300);
+      if (!behind) { note.hidden = true; return; }
+      const why = ix.diskFull ? 'indexing is paused (storage full)' : ix.stalled ? 'indexing is not moving' : 'indexing is catching up';
+      note.textContent = `${c.name}: ${why}. The index is ${ago(ix.lagSeconds)?.replace(/ ago$/, '') ?? 'an unknown time'} behind the chain, so the lists below are not current.`;
+      note.hidden = false;
+    } catch { /* the lists show their own errors */ }
+  }
+
   async function boot() {
     try { chains = (await api('/api/v1/chains')).chains; } catch { $('status').className = 'status bad'; $('status').textContent = 'The API is not answering.'; return; }
     const sel = $('chain');
@@ -210,7 +225,7 @@
     sel.value = String(chainId);
     const setChain = () => { chainId = Number(sel.value); explorer = chains.find((c) => c.id === chainId)?.explorer ?? null; };
     setChain();
-    sel.addEventListener('change', () => { setChain(); $('plate').hidden = true; $('evidence').hidden = true; $('raw').hidden = true; $('detail').textContent = ''; history.pushState({}, '', '/'); lists(); });
+    sel.addEventListener('change', () => { setChain(); indexerNote(); $('plate').hidden = true; $('evidence').hidden = true; $('raw').hidden = true; $('detail').textContent = ''; history.pushState({}, '', '/'); lists(); });
     $('trace').addEventListener('submit', (ev) => { ev.preventDefault(); trace($('address').value.trim()); });
     window.addEventListener('popstate', () => { const p = location.pathname.match(/^\/t\/(\d+)\/(0x[0-9a-fA-F]{40})$/); if (p) trace(p[2], { push: false }); });
 
@@ -218,7 +233,8 @@
     const tokens = await lists();
     if (m) trace(m[2], { push: false });
     else if (tokens[0]) trace(tokens[0].address, { push: false }); // open on a real, current example
-    setInterval(lists, 15000);
+    indexerNote();
+    setInterval(() => { lists(); indexerNote(); }, 15000);
   }
   boot();
 })();

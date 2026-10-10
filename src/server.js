@@ -66,11 +66,7 @@ export function createServer({ lookup, log = console }) {
           'referrer-policy': 'no-referrer',
         });
       }
-      if (parts[0] === 'health') {
-        const chains = lookup.status();
-        const bad = chains.some((c) => c.indexer?.lastError);
-        return send(res, 200, { ok: !bad, chains });
-      }
+      if (parts[0] === 'health') return send(res, 200, lookup.health(), { 'cache-control': 'no-store' });
       if (parts[0] === 'api' && parts[1] === 'v1') {
         const [, , resource, chainId, address] = parts;
         if (resource === 'chains') return send(res, 200, { chains: lookup.status() }, { 'cache-control': 'public, max-age=5' });

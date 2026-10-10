@@ -3,7 +3,7 @@
 // an index that started yesterday. One address-filtered eth_getLogs lookback settles it without
 // tracing or archive state: any log before the first sighting means the contract is older.
 
-import { hex, RpcError } from './rpc.js';
+import { hex, isCallerRefusal, rangeCapFrom, RpcError } from './rpc.js';
 
 /**
  * First block in [head - lookback, beforeBlock) where `address` emitted a log, or `beforeBlock`
@@ -12,26 +12,55 @@ import { hex, RpcError } from './rpc.js';
  */
 export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
   const lookbackFrom = Math.max(0, head - chain.ageLookbackBlocks);
-  const span = Math.max(1, chain.addrLogsSpan);
-  for (let a = lookbackFrom; a < beforeBlock; a += span) {
-    const b = Math.min(a + span - 1, beforeBlock - 1);
-    let logs;
+  // A range the node cannot serve is itself proof of heavy activity. Nodes say so in different ways:
+  // a JSON-RPC error ("more than 10000 results") or, on Base, a bare HTTP 5xx. Split the range and
+  // retry; a range that still fails at 50 blocks counts as activity at its start.
+  // Two failures are NOT activity, and must never date a contract:
+  //   - a stated block-range cap ("limited to a 200 range"): we asked too much, so re-ask in smaller pieces
+  //   - rate limiting or quota (HTTP 429, "request limit reached", "capacity limit exceeded"):
+  //     the node said nothing about the contract
+  const firstIn = async (a, b) => {
     try {
-      logs = await rpc.call('eth_getLogs', [{ address, fromBlock: hex(a), toBlock: hex(b) }]);
+      const logs = await rpc.call('eth_getLogs', [{ address, fromBlock: hex(a), toBlock: hex(b) }]);
+      return logs.length ? Math.min(...logs.map((l) => Number(l.blockNumber))) : null;
     } catch (e) {
-      if (e instanceof RpcError) return { firstLogBlock: a, lookbackFrom };
-      throw e;
+      if (isCallerRefusal(e)) throw e; // rate limit / quota: retried later; a guess here would be a false "old"
+      const cap = rangeCapFrom(e);
+      if (cap && cap < b - a + 1) {
+        chain.addrLogsSpan = cap; // learned for the rest of this process
+        for (let x = a; x <= b; x += cap) {
+          const found = await firstIn(x, Math.min(x + cap - 1, b));
+          if (found !== null) return found;
+        }
+        return null;
+      }
+      const heavy = e instanceof RpcError || e?.retryable || /HTTP 5\d\d/.test(e?.message ?? '');
+      if (!heavy) throw e;
+      if (b - a < 50) return a;
+      const mid = a + Math.floor((b - a) / 2);
+      return (await firstIn(a, mid)) ?? (await firstIn(mid + 1, b));
     }
-    if (logs.length) return { firstLogBlock: Math.min(...logs.map((l) => Number(l.blockNumber))), lookbackFrom };
+  };
+  for (let a = lookbackFrom; a < beforeBlock; ) {
+    const span = Math.max(1, chain.addrLogsSpan); // re-read: a stated cap shrinks it mid-probe
+    const b = Math.min(a + span - 1, beforeBlock - 1);
+    const found = await firstIn(a, b);
+    if (found !== null) return { firstLogBlock: found, lookbackFrom };
+    a = b + 1;
   }
   return { firstLogBlock: beforeBlock, lookbackFrom };
 }
 
-/** Date a few undated serial announcers. Cheap per call; the indexer runs it only when caught up. */
-export async function probePendingAges({ chain, rpc, store, head, max = 2 }) {
+/**
+ * Date a few undated serial announcers. Cheap per call; the indexer runs it only when caught up.
+ * `rows` lets the caller pass a cached slice of the pending list: finding it means grouping every
+ * birth in the stats window (~1 s at 100k tokens), which is too slow to repeat every cycle.
+ */
+export async function probePendingAges({ chain, rpc, store, head, max = 2, rows = null }) {
   const since = Math.max(0, head - chain.statsWindowBlocks);
   let n = 0;
-  for (const row of store.q.agePending.all({ c: chain.id, s: since, n: max })) {
+  for (const row of rows ?? store.q.agePending.all({ c: chain.id, s: since, n: max })) {
+    if (store.q.getAge.get(chain.id, row.emitter)) continue; // dated since the list was cached
     const { firstLogBlock, lookbackFrom } = await probeFirstLog(rpc, chain, row.emitter, head, row.first_block);
     store.q.putAge.run(chain.id, row.emitter, firstLogBlock, lookbackFrom, Math.floor(Date.now() / 1000));
     n++;

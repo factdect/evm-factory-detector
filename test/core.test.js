@@ -348,6 +348,16 @@ test('probeFirstLog: finds the earliest log, treats a refused (too busy) range a
   assert.deepEqual(await probeFirstLog(rpcWith((a) => { if (a === 1300) throw new RpcError('eth_getLogs', { message: 'query returned more than 10000 results' }); return []; }), chain, '0xabc', 2000, 1900),
     { firstLogBlock: 1300, lookbackFrom: 1000 });
   assert.deepEqual(await probeFirstLog(rpcWith(() => []), chain, '0xabc', 2000, 1900), { firstLogBlock: 1900, lookbackFrom: 1000 });
+  // Base answers a too-heavy range with a bare HTTP 500: split it instead of failing the whole probe
+  let seen = 0;
+  const http500 = rpcWith((a, b) => { if (b - a > 100) { throw Object.assign(new Error('HTTP 500'), { retryable: true }); } seen++; return a <= 1234 && 1234 <= b ? [{ blockNumber: '0x' + (1234).toString(16) }] : []; });
+  assert.deepEqual(await probeFirstLog(http500, chain, '0xabc', 2000, 1900), { firstLogBlock: 1234, lookbackFrom: 1000 });
+  assert.ok(seen > 0, 'answered from the split sub-ranges');
+  // a range that keeps failing even when tiny counts as activity at its start
+  const always500 = rpcWith(() => { throw Object.assign(new Error('HTTP 500'), { retryable: true }); });
+  assert.deepEqual(await probeFirstLog(always500, chain, '0xabc', 2000, 1900), { firstLogBlock: 1000, lookbackFrom: 1000 });
+  // a genuine failure (not a heavy range) still surfaces
+  await assert.rejects(() => probeFirstLog(rpcWith(() => { throw new TypeError('bad'); }), chain, '0xabc', 2000, 1900), TypeError);
 });
 
 test('candidates: a v4 hook that serves many tokens is pool machinery, not a new factory', () => {
@@ -555,4 +565,42 @@ test('silent factory: a contract that is called and minted to, many times, with 
     assert.ok(sys, 'the silent factory appears among the candidates');
     assert.deepEqual([sys.silent, sys.tokensAnnounced, sys.makerShare, sys.distinctNames], [true, 5, 1, 3]);
   });
+});
+
+test('containment: a helper that fires for only some of a launcher\'s tokens joins the launcher\'s system (Hydrex FeeUseRegistry case)', () => {
+  const store = openDb(':memory:');
+  const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map(), registries: new Map([[4663, reg]]), store });
+  store.q.setCursor.run(4663, 1001, 1000, 0);
+  const LAUNCHER = '0x' + 'a1'.repeat(20), FEE_REG = '0x' + 'f1'.repeat(20), OTHER = '0x' + 'c1'.repeat(20);
+  for (let i = 0; i < 6; i++) {
+    const t = '0x' + (0x80 + i).toString(16).padStart(40, '0');
+    store.saveToken({ chain_id: 4663, address: t, confidence: 'discovered', birth_block: 900 + i, birth_tx: '0x1', birth_source: 'x', fp_key: 'skel:h', tx_to: LAUNCHER, mint_to: LAUNCHER });
+    store.q.addRef.run(4663, t, LAUNCHER, '0x' + '0a'.repeat(32), 1, 900 + i);
+    if (i % 2 === 0) store.q.addRef.run(4663, t, FEE_REG, '0x' + '0b'.repeat(32), 2, 900 + i); // only non-default fee choices
+  }
+  // an unrelated factory with 3 of its own tokens must stay separate
+  for (let i = 0; i < 3; i++) { const t = '0x' + (0x90 + i).toString(16).padStart(40, '0'); store.saveToken({ chain_id: 4663, address: t, confidence: 'discovered', birth_block: 950 + i, birth_tx: '0x2', birth_source: 'x', fp_key: 'skel:o' }); store.q.addRef.run(4663, t, OTHER, '0x' + '0c'.repeat(32), 1, 950 + i); }
+  const list = lk.candidates(4663, { status: 'all' }).list;
+  const sys = list.find((c) => c.emitter === LAUNCHER);
+  assert.ok(sys, 'launcher is a candidate');
+  assert.deepEqual(sys.coEmitters.map((c) => c.address), [FEE_REG], 'the fee registry is folded into the launcher');
+  assert.ok(!list.some((c) => c.emitter === FEE_REG), 'and is not listed as its own factory');
+  assert.ok(list.some((c) => c.emitter === OTHER && c.coEmitters.length === 0), 'an unrelated factory stays separate');
+});
+
+test('Base registry: Hydrex by its real Launched topic0, Catalyst by a raw topic0 (unnamed event), Algebra plumbing is infra', async () => {
+  const { loadRegistry: load, INFRA_TOPICS } = await import('../src/attribution.js');
+  const b = load(8453);
+  const HYDREX_T0 = '0xc2db62a8b9fafda754bbbe6f629d1024152b40e634c3152bef7ed271fc04f7ff';
+  const CATALYST_T0 = '0x2be785ccf7b590ba8e667ac501298833714a7c84afa587717b5768b151a4a7e8';
+  const tok = '0x' + '5d'.repeat(20);
+  const hyd = matchKnownEvent(b, { address: '0x1a7460cfc2b44eb2ffb9879612e726bf6bf52745', topics: [HYDREX_T0, pad32(tok), pad32('0x' + '01'.repeat(20)), pad32('0x' + '02'.repeat(20))], data: '0x' });
+  assert.deepEqual([hyd.launchpadId, hyd.confidence, hyd.token], ['hydrex', 'verified', tok]);
+  const cat = matchKnownEvent(b, { address: '0x4d958575d15cb719f1caf65af04c0fd749e63f69', topics: [CATALYST_T0, pad32(tok), pad32('0x' + '03'.repeat(20))], data: '0x' + '0'.repeat(192) });
+  assert.deepEqual([cat.launchpadId, cat.confidence], ['catalyst', 'observed-emitter'], 'unverified contracts, observed not verified');
+  const spoof = matchKnownEvent(b, { address: '0x' + 'ee'.repeat(20), topics: [HYDREX_T0, pad32(tok)], data: '0x' });
+  assert.notEqual(spoof.launchpadId, 'hydrex', 'same event from another address is never credited to Hydrex');
+  const infra = [...(INFRA_TOPICS.values?.() ?? Object.values(INFRA_TOPICS))].join(' ');
+  assert.match(infra, /Algebra pool deployer/);
 });

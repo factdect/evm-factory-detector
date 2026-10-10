@@ -2,7 +2,10 @@
 // for every chain; only these numbers, the RPC URL and the launchpad registry change.
 //
 // Override per chain with env vars:  RPC_<id>, RPC_HEADERS_<id> (JSON), MIN_INTERVAL_MS_<id>,
-// LOGS_CHUNK_<id>, STATE_WINDOW_<id> (0 = unlimited, use with an archive RPC), START_BLOCK_<id>.
+// LOGS_CHUNK_<id>, STATE_WINDOW_<id> (0 = unlimited, use with an archive RPC), START_BLOCK_<id>,
+// MAX_LAG_BLOCKS_<id> (0 = never jump ahead after a stall).
+// Global: BACKFILL=off (do not replay stall gaps), RETAIN_REFS_DAYS (0 = keep all birth evidence),
+// MIN_FREE_MB (below this, the oldest birth evidence is pruned; default 150).
 
 const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11';
 
@@ -36,6 +39,12 @@ const DEFAULTS = {
     blockTimeMs: 2000,
     minIntervalMs: 350,
     logsChunk: 400,
+    // Address-filtered getLogs span. mainnet.base.org caps every getLogs at 200 blocks since
+    // 2026-10-08 (2,000 before 10-05, 500 until 10-08); a stated cap is learned from the error, so
+    // this stays at 2,000 for private RPCs that allow it.
+    addrLogsSpan: 2000,
+    // ~4,000 token births a day: date announcers over 2 days, not 7, to keep the probe cheap
+    ageLookbackBlocks: 86_400,
     logsSoftCap: 9500,
     confirmations: 5,
     pollMs: 4000,
@@ -74,7 +83,14 @@ export function loadChains(env = process.env) {
     // A contract that emitted anything before we first saw it announce a token is not new.
     // We look this far back for its first log (default 7 days).
     c.addrLogsSpan = num(env[`ADDR_LOGS_SPAN_${id}`], c.addrLogsSpan ?? c.logsChunk);
-    c.ageLookbackBlocks = num(env[`AGE_LOOKBACK_BLOCKS_${id}`], Math.round((7 * 86400 * 1000) / c.blockTimeMs));
+    c.ageLookbackBlocks = num(env[`AGE_LOOKBACK_BLOCKS_${id}`], c.ageLookbackBlocks ?? Math.round((7 * 86400 * 1000) / c.blockTimeMs));
+    // Further behind than this (default: 4 state windows, at least 30 minutes of blocks), live
+    // indexing jumps ahead and the skipped blocks are replayed in the background.
+    c.maxLagBlocks = num(env[`MAX_LAG_BLOCKS_${id}`], Math.max(c.stateWindow * 4, Math.round((30 * 60 * 1000) / c.blockTimeMs)));
+    c.backfill = !/^(0|off|false|no)$/i.test(env.BACKFILL ?? '');
+    c.retainRefsDays = num(env.RETAIN_REFS_DAYS, 0);
+    c.minFreeBytes = num(env.MIN_FREE_MB, 150) * 1024 * 1024;
+    c.publicRpc = c.rpc === base?.rpc;
     out.set(id, c);
   }
   if (out.size === 0) throw new Error('CHAINS is empty. Example: CHAINS=4663 or CHAINS=4663,8453');

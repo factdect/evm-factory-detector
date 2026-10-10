@@ -38,6 +38,14 @@ const INFRA_SIGNATURES = {
   'Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)': 'Uniswap v4 PoolManager',
   'ModifyLiquidity(bytes32,address,int24,int24,int256,bytes32)': 'Uniswap v4 PoolManager',
   'Approval(address,address,address,uint160,uint48)': 'Permit2 allowance',
+  // Algebra Integral (Hydrex, and other Algebra-based DEXes): pool deployer and pool machinery
+  'Pool(address,address,address)': 'Algebra pool deployer',
+  'Initialize(uint160,int24)': 'Algebra pool',
+  'Plugin(address)': 'Algebra pool',
+  'CommunityVault(address)': 'Algebra pool',
+  'Swap(address,address,int256,int256,uint160,uint128,int24,uint24,uint24)': 'Algebra pool',
+  'Mint(address,address,int24,int24,uint128,uint256,uint256)': 'Algebra pool',
+  'IncreaseLiquidity(uint256,uint128,uint128,uint256,uint256,address)': 'Algebra position manager',
   'Permit(address,address,address,uint160,uint48,uint48)': 'Permit2 allowance',
 };
 // Canonical same-address-on-every-chain contracts that show up in launch transactions.
@@ -68,7 +76,8 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
     for (const c of lp.contracts ?? []) companionOf.set(lc(c.address), { launchpadId: lp.id, label: c.label ?? null });
     launchpads.set(lp.id, { id: lp.id, name: lp.name, url: lp.url ?? null, stack: lp.stack ?? null });
     for (const ev of lp.events ?? []) {
-      const topic0 = toEventSelector(ev.signature);
+      // an event whose name is unknown (unverified contract) is registered by its raw topic0
+      const topic0 = ev.topic0 ? ev.topic0.toLowerCase() : toEventSelector(ev.signature);
       const emitters = new Map((ev.emitters ?? []).map((e) => [lc(e.address), { label: e.label ?? null, status: e.status ?? 'confirmed', source: e.source ?? null }]));
       for (const [addr, e] of emitters) factoryOf.set(addr, { launchpadId: lp.id, label: e.label });
       const platform = ev.platform ? {

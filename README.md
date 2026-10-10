@@ -29,6 +29,16 @@ Some factories emit no creation event at all, so event-based discovery sees each
 
 `token.sameNameElsewhere` counts other token contracts carrying the exact same name and symbol. On Robinhood Chain one silent factory was seen minting five different contracts named "Hylo 3x Leveraged HYPE" in ten hours; this field is how a lookup warns you that the name alone identifies nothing.
 
+### Base (8453)
+
+Enable with `CHAINS=4663,8453` **and set `RPC_8453` to a private endpoint.** Base births roughly 4,000 ERC-20 tokens a day. The public RPC (`mainnet.base.org`) is no longer usable for this from a server: it cut `eth_getLogs` to 500 blocks on 2026-10-05 and to 200 blocks on 2026-10-08, and since 2026-10-08 (about 15:00 UTC) it answers about 98% of requests from datacenter hosts with HTTP 429 "request limit reached" (measured by bracketedz.com from Railway, and confirmed from a second host). The service logs a warning at boot when Base runs on the public RPC.
+
+What the code does about it: a node that states its block-range cap ("limited to a 200 range", Alchemy's "up to a N block range", dRPC's "ranges over N blocks") is believed, and the cap is used from then on instead of halving and growing back into the wall. Announcers are dated over 2 days rather than 7. Base nodes answer a range too heavy to serve with a bare HTTP 500; the age probe treats that like a busy range (splits it, then counts it as activity). It never treats rate limiting or an exhausted quota that way: those say nothing about the contract, so the probe fails and is retried later rather than calling a brand-new factory "old".
+
+Registry `registry/8453.json` ships with Hydrex (Hydropump launcher, `confirmed`: public source) and Catalyst Markets (`observed`: unverified contracts, identified on-chain). An event whose name is unknown can be registered by its raw `topic0`. Algebra Integral pool-deployer and pool events are treated as DEX infrastructure, so new Algebra pools never show up as factories.
+
+A helper contract that only fires for some of a launcher's tokens (for example a fee registry that logs non-default choices) is folded into that launcher's system by containment, rather than being reported as a separate new factory.
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -70,8 +80,8 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 | `/api/v1/stocks/:chainId` | New quote tokens from known issuers (Robinhood stock tokens). Each row: when it was added, `pairsLaunched` (how many launches use it as their pair), `open` (true = nobody has launched against it yet), and `firstLaunch` (the first token on that pair, its launchpad, and `secondsAfterListing`). A token counts only if its beacon slot matches the issuer's — name-alikes are rejected. |
 | `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). `firstActivityAgoSec` is the contract's first log on-chain (dated in idle time by an address-filtered getLogs lookback, default 7 days), not when this index first saw it. `makerShare` = share of its tokens whose deployer called it or whose first mint went to it. Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `pool-hook` \| `dex-plumbing` \| …, `sinceHours=24` (first on-chain activity within N hours; undated systems are counted in `pendingAgeCheck`, never guessed), `min=2`, `limit=100`. Response carries `total` beside the page. |
 | `/api/v1/launchpads/:chainId` | Registry with provenance per factory address and indexed counts |
-| `/api/v1/chains` | Configured chains and indexer status (head, lag, discovery on/off) |
-| `/health` | Same, with `ok` |
+| `/api/v1/chains` | Configured chains and indexer status: head, lag (blocks and seconds), `stalled`, `diskFull`, discovery on/off, stall-gap replay progress (`backfill`), RPC counters |
+| `/health` | Same, plus `storage` and `ok` / `problems`. `ok` is false when an indexer is stalled (an error for 2 minutes, or no progress for 5), the disk is full, free disk is under 64 MB, room to write into is below `MIN_FREE_MB`, or the evidence migration failed |
 
 Page: `/` and shareable `/t/:chainId/:address`.
 
@@ -82,11 +92,28 @@ Indexed tokens cost no RPC call. Tokens outside the index cost one batched RPC r
 One service, one volume.
 
 1. New service from the repo. Start command is `npm start`.
-2. Add a volume mounted at `/data`. Set `DB_PATH=/data/factory.db`.
+2. Add a volume mounted at `/data` (Hobby plan or above: 0.5 GB lasts days, see "Storage"). Set `DB_PATH=/data/factory.db`.
 3. Set `CHAINS=4663`. Optional: `ETHERSCAN_API_KEY` or `BLOCKSCOUT_API_KEY` for on-demand lookups of tokens born before the index.
 4. Health check path: `/health`.
 
 Keep `ROLE=all`. The indexer and the API share one paced RPC client, so public lookups can never push the indexer into HTTP 429. Splitting into two services only works if both can open the same SQLite file, which Railway volumes do not allow.
+
+### Storage
+
+Railway volumes are 0.5 GB on the Free and Trial plans, 5 GB on Hobby and 50 GB on Pro, and can be grown on the paid plans only. On 2026-09-25 the 0.5 GB volume filled at about 91,000 tokens and indexing stopped for 14 days, while `/health` kept saying "19 blocks behind". What changed:
+
+- **Smaller evidence.** The birth evidence (which contracts mentioned a token in its birth receipt, about 7 rows per token) used to be hex text with three indexes, about 5 KB per token. It is now stored as integer ids, about 1 KB per token. All in, with the token rows, a token costs 1–2.5 KB instead of 5.5–6.7 KB (measured on two 91,000–100,000-token databases). Robinhood Chain births about 16,500 tokens a day, so expect 17–40 MB a day: a 5 GB volume lasts roughly 4 to 9 months. `/health` → `storage.daysLeft` gives the real figure.
+- **Migration.** The old table is copied into the new form on the first boot that has room, in batches, and dropped only after every row is copied and counted (91,000 tokens: about 10 s). It needs free disk for the new tables plus some WAL: about 170 bytes per evidence row plus 64 MB, and about 25 MB more for two new token indexes (about 200 MB in all for a 91,000-token database; with less, it waits and `/health` says how much is missing). The space the old table frees inside the file is reused before the file grows. Interrupting it is safe: the next boot finishes it.
+- **Pruning, last resort.** When room to write into (free disk plus reusable pages inside the file) drops below `MIN_FREE_MB` (default 150), and whenever the disk is full, the oldest birth evidence is deleted in small steps, always keeping the 3-day stats window plus a day. Tokens are never deleted: each keeps its launchpad, factory, maker and fingerprint. Each factory's first sighting and the index start are kept, so ages do not move. A token whose announcers were pruned gets the verdict `evidence-pruned`, never "silent". `RETAIN_REFS_DAYS=N` prunes evidence older than N days on a schedule instead (never inside the stats window).
+- **A full disk pauses, it does not spin.** Indexing waits a minute between attempts and says `diskFull` in `/health`; it resumes by itself once there is room. Lookups keep working from what is indexed. If the volume is so full the database cannot even be opened, the service answers every request with 503 and an explanation, and restarts by itself once the database opens again.
+- **Grow the volume before deploying onto a full one.** Railway runs one deployment at a time for a service with a volume, so a deploy onto a full volume replaces the running one with the 503 page; it does not keep the old one serving. A 0.5 GB volume holding ~500 MB cannot migrate at all (the new tables need room before the old one is dropped).
+- `/health` → `storage` shows the database size, free disk (`fsFreeBytes`), pages reusable inside the file, bytes per token, `daysLeft`, and the migration state. `diskLow` (under 64 MB of free disk) is a problem even when the file has reusable pages: the WAL, a migration and index builds need real disk.
+
+**Going back to an older build.** update-12 and earlier cannot open a migrated database (they create indexes on `birth_refs`, which is now a view) and would crash at boot. To roll back: stop the service, then in a shell with the volume mounted run `DB_PATH=/data/factory.db node scripts/rollback-evidence.mjs`, then deploy the older build. It rebuilds the old text table with its indexes (it needs the old form's space again, about 750 bytes per evidence row). Older builds do not replay stall gaps.
+
+### After a long stall
+
+When the indexer is further behind than `MAX_LAG_BLOCKS_<id>` (default: 30 minutes of blocks), live indexing does not replay everything in order (discovery of unknown factories cannot run that far back anyway). It resumes at the edge of the node's state window, so the live feed is current again within a minute, and the skipped blocks are queued as a gap. A background loop replays the gap newest-first for known launchpad events only, using a lower-priority lane of the same RPC budget, so the live loop never waits for it. `/health` → `backfill` shows blocks left and an ETA. On the public Robinhood RPC a replay ran at 50–120 blocks a second in testing, so two weeks of chain (about 12 million blocks) takes one to three days. `BACKFILL=off` skips the replay; tokens in the gap can still be looked up one by one (`ETHERSCAN_API_KEY` / `BLOCKSCOUT_API_KEY` help there). Until the replay has passed it, a stock token listed inside the gap reports `countComplete: false`.
 
 ## Add a launchpad
 
@@ -129,23 +156,25 @@ Not supported: chains that are not bytecode-equivalent (zkSync Era breaks finger
 ## Limits, stated plainly
 
 - **Reorgs:** handled by staying `confirmations` blocks behind head only. No block-hash tracking.
-- **Births outside the state window** (downtime longer than a few minutes, deep backfill) are found only through registry events, unless you point `RPC_<id>` at an archive node and set `STATE_WINDOW_<id>=0`.
+- **Births outside the state window** (downtime longer than a few minutes, deep backfill, stall-gap replay) are found only through registry events, unless you point `RPC_<id>` at an archive node and set `STATE_WINDOW_<id>=0`.
 - **Tokens that do not mint in their creation transaction** are missed by discovery.
 - **Vyper** keeps immutables after the code, so Vyper templates do not collapse into one skeleton.
 - **The explorer adapters** (`src/explorer.js`: Etherscan V2, Blockscout PRO) are written against the documented `getcontractcreation` response and unit-tested with stubs. Neither has been run against the live APIs. They fail soft: on any surprise the lookup falls back to bytecode evidence.
 - **Verified means provenance, not safety.** A token from a verified factory can still be a bad buy.
-- **Growth:** `birth_refs` grows by a few rows per birth. Rows older than the stats window can be deleted without affecting attribution.
+- **Growth:** about 1 KB per token (see "Storage"). Evidence older than the stats window can be pruned without affecting attribution.
 
 ## Layout
 
 ```
 src/chains.js       per-chain numbers and env overrides
-src/rpc.js          paced JSON-RPC client: batching, priority queue, 429 backoff, adaptive getLogs ranges
+src/rpc.js          paced JSON-RPC client: batching, priority + background lanes, 429 backoff, getLogs ranges that learn a stated cap
 src/fingerprint.js  minimal-proxy detection, opcode skeleton hash
 src/attribution.js  registry loader, event matching, "who announced this token" from a receipt
 src/births.js       records one birth (shared by indexer and on-demand lookups)
-src/indexer.js      the loop
-src/lookup.js       index rows -> public JSON, candidates (the detector)
+src/indexer.js      the live loop, plus a background loop (probes, storage, stall-gap replay)
+src/db.js           SQLite schema, compact birth evidence, migration and its rollback, pruning, disk accounting
+scripts/            rollback-evidence.mjs (undo the evidence migration for an older build)
+src/lookup.js       index rows -> public JSON, candidates (the detector), /health
 src/age.js          dates announcing contracts by their first on-chain log
 src/explorer.js     optional explorer adapters (Etherscan V2, Blockscout PRO)
 src/server.js       HTTP API + static page, strict CSP

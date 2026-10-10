@@ -12,26 +12,73 @@ export class RpcError extends Error {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const RATE_RE = /rate.?limit|too many requests|exceeded.*(quota|capacity)|throttl/i;
+// "request limit reached" is mainnet.base.org's wording (HTTP 429, code -32011), seen since 2026-10-08.
+const RATE_RE = /rate.?limit|too many requests|request limit|exceeded.*(quota|capacity)|throttl/i;
 export const isRateLimit = (e) => e?.code === 429 || e?.code === -32005 || RATE_RE.test(e?.message ?? '');
+// What the transport throws once it gave up on a rate-limited request.
+// (503 is answered like 429 by the transport: a node shedding load, not a statement about the query)
+export const isRateLimitFailure = (e) => /^HTTP (?:429|503)\b|^rate limited\b/.test(e?.message ?? '') || isRateLimit(e);
+// Refusals about the caller (rate, quota, key, a block page), not about the query: they say nothing
+// about the chain, so nothing may be concluded from them.
+export const isCallerRefusal = (e) => isRateLimitFailure(e)
+  || /capacity limit|quota|api.?key|unauthori[sz]ed|forbidden|\bHTTP 40[13]\b|non-JSON response/i.test(e?.message ?? '');
+
+const isRetryable = (e) => e?.retryable || e?.name === 'AbortError' || e?.name === 'TimeoutError'
+  || (e instanceof TypeError && /fetch failed|terminated|network|socket/i.test(e.message));
+const retryDelay = (e, attempt) => (e?.backoff ?? Math.min(30000, 1000 * 2 ** (attempt - 1))) + Math.random() * 250;
+
+// A node that states its eth_getLogs block-range cap. Learning the number beats halving blindly:
+// Base cut its public RPC to 500 blocks on 2026-10-05 and to 200 on 2026-10-08.
+const RANGE_CAP_RES = [
+  /limited to a ([\d,]+)(?:[- ]block)? range/i,       // mainnet.base.org, sepolia.base.org
+  /up to a ([\d,]+) block range/i,                     // Alchemy free tier
+  /ranges? over ([\d,]+) blocks?/i,                    // dRPC free plan
+  /block range (?:limit|is limited to|exceeds?(?: the)?(?: max(?:imum)?)?)\D{0,12}([\d,]+)/i,
+  /max(?:imum)? (?:block )?range(?: of| is|:)? ([\d,]+)/i,
+];
+/** Block count a node says it allows per eth_getLogs, or null when the error does not say. */
+export function rangeCapFrom(e) {
+  const msg = String(e?.message ?? '');
+  for (const re of RANGE_CAP_RES) {
+    const m = msg.match(re);
+    if (m) { const n = Number(m[1].replace(/,/g, '')); if (Number.isFinite(n) && n > 0) return n; }
+  }
+  return null;
+}
 export const isStateUnavailable = (e) =>
   /historical state|missing trie node|state .*not available|pruned|header not found|archive/i.test(e?.message ?? '');
 
 export const hex = (n) => '0x' + Number(n).toString(16);
 
 export class Rpc {
-  constructor({ url, headers = {}, minIntervalMs = 500, timeoutMs = 30000, maxRetries = 6, batchMax = 12 }) {
+  constructor({ url, headers = {}, minIntervalMs = 500, timeoutMs = 30000, bgTimeoutMs = 10000, maxRetries = 6, batchMax = 12 }) {
     this.url = url;
     this.headers = headers;
     this.minIntervalMs = minIntervalMs;
     this.timeoutMs = timeoutMs;
+    this.bgTimeoutMs = bgTimeoutMs; // a background request holds the line while it waits: keep it short
     this.maxRetries = maxRetries;
     this.batchMax = batchMax;
     this.queue = [];
+    this.lowQueue = []; // background work: sent only when nothing else is waiting
     this.running = false;
     this.lastStart = 0;
     this.nextId = 1;
     this.stats = { http: 0, calls: 0, rateLimited: 0, retries: 0, errors: 0 };
+  }
+
+  /**
+   * The same client and rate budget for background work (stall replay, age and platform probes):
+   * its calls are sent only when no normal call is waiting, so the live indexer never queues
+   * behind a backlog. Lookups ({ priority: true }) still jump every queue.
+   */
+  background() {
+    const low = (o) => ({ ...o, low: o.priority !== true });
+    return {
+      url: this.url, stats: this.stats,
+      call: (method, params = [], opts = {}) => this.call(method, params, low(opts)),
+      batch: (calls, opts = {}) => this.batch(calls, low(opts)),
+    };
   }
 
   /** Single call. Resolves with `result`, rejects with RpcError. */
@@ -50,31 +97,70 @@ export class Rpc {
     const out = [];
     for (let i = 0; i < calls.length; ) {
       const slice = calls.slice(i, i + this.batchMax); // batchMax can shrink while we wait, so advance by what was sent
-      out.push(...(await this.#enqueue(slice, opts.priority === true)));
+      out.push(...(await this.#enqueue(slice, opts.priority === true, opts.low === true)));
       i += slice.length;
     }
     return out;
   }
 
-  #enqueue(calls, priority) {
+  #enqueue(calls, priority, low = false) {
     return new Promise((resolve, reject) => {
-      const job = { calls, resolve, reject };
-      if (priority) this.queue.unshift(job); else this.queue.push(job);
+      const job = { calls, resolve, reject, low: low && !priority, attempt: 0, notBefore: 0 };
+      if (priority) this.queue.unshift(job); else if (job.low) this.lowQueue.push(job); else this.queue.push(job);
       this.#drain();
     });
   }
 
+  /**
+   * One request at a time, normal lane first. A background job gets one attempt per turn: when it
+   * fails with something worth retrying it goes to the back of its lane with a backoff, instead of
+   * retrying in place (which used to keep live calls waiting through every retry).
+   */
   async #drain() {
     if (this.running) return;
     this.running = true;
     try {
-      while (this.queue.length) {
-        const job = this.queue.shift();
-        try { job.resolve(await this.#send(job.calls)); } catch (e) { job.reject(e); }
+      for (;;) {
+        let job = this.queue.shift();
+        if (!job && this.lowQueue.length) {
+          // A caller that just got its answer usually asks again within a few microtasks. Let it
+          // queue that call first; otherwise the live loop would wait one background call per call.
+          await new Promise((r) => setImmediate(r));
+          job = this.queue.shift();
+          if (!job) {
+            const now = Date.now();
+            const i = this.lowQueue.findIndex((j) => j.notBefore <= now);
+            if (i >= 0) job = this.lowQueue.splice(i, 1)[0];
+            else { this.#wakeLater(Math.min(...this.lowQueue.map((j) => j.notBefore)) - now); break; }
+          }
+        }
+        if (!job) break;
+        if (!job.low) {
+          try { job.resolve(await this.#send(job.calls)); } catch (e) { job.reject(e); }
+          continue;
+        }
+        try {
+          job.resolve(await this.#attempt(job.calls, this.bgTimeoutMs));
+        } catch (e) {
+          if (isRetryable(e) && job.attempt < this.maxRetries) {
+            job.attempt++;
+            this.stats.retries++;
+            job.notBefore = Date.now() + retryDelay(e, job.attempt);
+            this.lowQueue.push(job);
+          } else {
+            this.stats.errors++;
+            job.reject(e);
+          }
+        }
       }
     } finally {
       this.running = false;
     }
+  }
+
+  #wakeLater(ms) {
+    clearTimeout(this.wake);
+    this.wake = setTimeout(() => { this.wake = null; this.#drain(); }, Math.max(1, ms));
   }
 
   async #pace() {
@@ -83,69 +169,68 @@ export class Rpc {
     this.lastStart = Date.now();
   }
 
+  /** Normal lane: retry in place with backoff. */
   async #send(calls) {
-    const single = calls.length === 1;
-    const payload = calls.map((c) => ({ jsonrpc: '2.0', id: this.nextId++, method: c.method, params: c.params ?? [] }));
-    let attempt = 0;
-    for (;;) {
-      await this.#pace();
-      this.stats.http++;
-      let backoff = null;
+    for (let attempt = 0; ; ) {
       try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
-        let res, text;
-        try {
-          res = await fetch(this.url, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', ...this.headers },
-            body: JSON.stringify(single ? payload[0] : payload),
-            signal: ctrl.signal,
-          });
-          text = await res.text();
-        } finally {
-          clearTimeout(timer);
-        }
-        if (res.status === 429 || res.status === 503) {
-          this.stats.rateLimited++;
-          const ra = Number(res.headers.get('retry-after'));
-          backoff = Number.isFinite(ra) && ra > 0 ? ra * 1000 : null;
-          throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
-        }
-        if (res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
-        let body;
-        try { body = JSON.parse(text); } catch { throw Object.assign(new Error(`non-JSON response (HTTP ${res.status})`), { retryable: true }); }
-        // Some nodes reject an oversized batch with one error object instead of an array.
-        if (!single && !Array.isArray(body)) {
-          if (calls.length > 1) {
-            const mid = calls.length >> 1;
-            this.batchMax = Math.max(1, mid); // remember the smaller size for later batches
-            return [...(await this.#send(calls.slice(0, mid))), ...(await this.#send(calls.slice(mid)))];
-          }
-        }
-        const arr = Array.isArray(body) ? body : [body];
-        // A rate-limit error can also arrive as a JSON-RPC error with HTTP 200.
-        if (arr.some((r) => r?.error && isRateLimit(r.error))) {
-          this.stats.rateLimited++;
-          throw Object.assign(new Error('rate limited (JSON-RPC)'), { retryable: true });
-        }
-        const byId = new Map(arr.map((r) => [r?.id, r]));
-        this.stats.calls += calls.length;
-        return payload.map((p) => {
-          const r = byId.get(p.id);
-          if (!r) return { error: { code: -1, message: 'missing response in batch' } };
-          return r.error ? { error: r.error } : { result: r.result };
-        });
+        return await this.#attempt(calls, this.timeoutMs);
       } catch (e) {
         // Only transport problems are worth retrying. A bare TypeError is a bug, not a network blip.
-        const retryable = e.retryable || e.name === 'AbortError' || e.name === 'TimeoutError'
-          || (e instanceof TypeError && /fetch failed|terminated|network|socket/i.test(e.message));
-        if (!retryable || attempt >= this.maxRetries) { this.stats.errors++; throw e; }
+        if (!isRetryable(e) || attempt >= this.maxRetries) { this.stats.errors++; throw e; }
         attempt++;
         this.stats.retries++;
-        await sleep(backoff ?? Math.min(30000, 1000 * 2 ** (attempt - 1)) + Math.random() * 250);
+        await sleep(retryDelay(e, attempt));
       }
     }
+  }
+
+  /** One HTTP request. Throws { retryable, backoff } for what is worth another try. */
+  async #attempt(calls, timeoutMs) {
+    const single = calls.length === 1;
+    const payload = calls.map((c) => ({ jsonrpc: '2.0', id: this.nextId++, method: c.method, params: c.params ?? [] }));
+    await this.#pace();
+    this.stats.http++;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res, text;
+    try {
+      res = await fetch(this.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...this.headers },
+        body: JSON.stringify(single ? payload[0] : payload),
+        signal: ctrl.signal,
+      });
+      text = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.status === 429 || res.status === 503) {
+      this.stats.rateLimited++;
+      const ra = Number(res.headers.get('retry-after'));
+      throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true, backoff: Number.isFinite(ra) && ra > 0 ? ra * 1000 : null });
+    }
+    if (res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
+    let body;
+    try { body = JSON.parse(text); } catch { throw Object.assign(new Error(`non-JSON response (HTTP ${res.status})`), { retryable: true }); }
+    // Some nodes reject an oversized batch with one error object instead of an array.
+    if (!single && !Array.isArray(body) && calls.length > 1) {
+      const mid = calls.length >> 1;
+      this.batchMax = Math.max(1, mid); // remember the smaller size for later batches
+      return [...(await this.#send(calls.slice(0, mid))), ...(await this.#send(calls.slice(mid)))];
+    }
+    const arr = Array.isArray(body) ? body : [body];
+    // A rate-limit error can also arrive as a JSON-RPC error with HTTP 200.
+    if (arr.some((r) => r?.error && isRateLimit(r.error))) {
+      this.stats.rateLimited++;
+      throw Object.assign(new Error('rate limited (JSON-RPC)'), { retryable: true });
+    }
+    const byId = new Map(arr.map((r) => [r?.id, r]));
+    this.stats.calls += calls.length;
+    return payload.map((p) => {
+      const r = byId.get(p.id);
+      if (!r) return { error: { code: -1, message: 'missing response in batch' } };
+      return r.error ? { error: r.error } : { result: r.result };
+    });
   }
 }
 
@@ -164,7 +249,17 @@ export async function getLogsRange(rpc, filter, from, to, state, softCap = 9500)
     try {
       logs = await rpc.call('eth_getLogs', [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }]);
     } catch (e) {
-      if (e instanceof RpcError && b > a) { state.span = Math.max(1, Math.floor((b - a + 1) / 2)); continue; }
+      if (e instanceof RpcError && b > a) {
+        const cap = rangeCapFrom(e);
+        if (cap && cap < b - a + 1) {
+          // the node told us its cap: use it from now on instead of growing back into the wall
+          state.max = Math.min(state.max, cap);
+          state.span = Math.min(state.span, cap);
+        } else {
+          state.span = Math.max(1, Math.floor((b - a + 1) / 2));
+        }
+        continue;
+      }
       throw e;
     }
     if (logs.length >= softCap && b > a) { state.span = Math.max(1, Math.floor((b - a + 1) / 2)); continue; }

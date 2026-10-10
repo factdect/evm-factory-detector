@@ -1,6 +1,119 @@
 {
   "chainId": 8453,
-  "updated": "2026-09-20",
+  "updated": "2026-09-26",
   "notes": "Empty on purpose: with no registry the indexer runs in discovery-only mode. Add launchpads in the same shape as registry/4663.json.",
-  "launchpads": []
+  "launchpads": [
+    {
+      "id": "hydrex",
+      "name": "Hydrex (Hydropump)",
+      "url": "https://www.hydrex.fi",
+      "stack": "Permissionless launcher (UUPS proxy). Fixed 10B-supply immutable ERC-20, Algebra Integral pool vs a whitelisted quote (PairDirectory), 5 single-sided bands, positions locked forever; 75/25 creator/protocol fee split; 10-block anti-snipe buy tax.",
+      "events": [
+        {
+          "signature": "Launched(address,address,address,address,int24,uint256[],string,string,bytes32,uint64)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "creator": {
+              "from": "topic",
+              "index": 2
+            },
+            "quote": {
+              "from": "topic",
+              "index": 3
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x1a7460cfc2b44eb2ffb9879612e726bf6bf52745",
+              "label": "HydropumpLauncher",
+              "status": "confirmed",
+              "source": "github.com/hydrexfi/hydropump-contracts (public source, 'Permissionless token launch contracts for Hydrex on Base'); proxy created 2026-09-25T18:31:53Z by 0x40fbfe5312330f278824ddbb7521ab77409192f0, block 51785883"
+            }
+          ],
+          "topic0": "0xc2db62a8b9fafda754bbbe6f629d1024152b40e634c3152bef7ed271fc04f7ff"
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x9c11834644c91a73aa959b01bb7f1e148af40d43",
+          "label": "HydropumpLocker (LP positions, creator fees)"
+        },
+        {
+          "address": "0x183c76e489684ad104d380d8487b3e37b918e7aa",
+          "label": "FeeUseRegistry"
+        },
+        {
+          "address": "0x22c104bf0ccc2258911ffa4df7ec80f199ea0827",
+          "label": "PairDirectory (whitelisted quotes)"
+        },
+        {
+          "address": "0x7034d57e6ac1e0ef103464d254a53960a37f9ee9",
+          "label": "HydropumpLauncher implementation"
+        },
+        {
+          "address": "0x36077d39cdc65e1e3fb65810430e5b2c4d5fa29e",
+          "label": "Algebra pool deployer (Hydrex DEX)"
+        },
+        {
+          "address": "0x07e61107583ed6c10dc08dbe2928439a1da7ca9c",
+          "label": "Algebra plugin / security registry (Hydrex DEX)"
+        },
+        {
+          "address": "0xc63e9672f8e93234c73ce954a1d1292e4103ab86",
+          "label": "Algebra position manager (Hydrex DEX)"
+        }
+      ]
+    },
+    {
+      "id": "catalyst",
+      "name": "Catalyst Markets",
+      "url": "https://catalyst.markets",
+      "stack": "Permissioned (EIP-712 signature from a registry signer). 1,000,000-supply Solady-style ERC-20 with Permit2, CREATE2 vanity prefix 0xca7a, Uniswap v4 pool vs USDC with a custom hook, 8-position seeding, per-market epoch vault.",
+      "events": [
+        {
+          "topic0": "0x2be785ccf7b590ba8e667ac501298833714a7c84afa587717b5768b151a4a7e8",
+          "signature": "(unnamed: token, hook indexed; quote, 0, vault in data)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "hook": {
+              "from": "topic",
+              "index": 2
+            },
+            "quote": {
+              "from": "data",
+              "word": 0
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x4d958575d15cb719f1caf65af04c0fd749e63f69",
+              "label": "factory",
+              "status": "observed",
+              "source": "Not published by Catalyst; contracts unverified. On-chain 2026-09-23: EIP-712 domain 'CatalystMarkets' v1 embedded in the factory bytecode; all 6 tokens it created carry the 0xca7a vanity prefix; catalyst.markets links these tokens."
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x98c9c7e416977ae5585595ef530bb05f1c7dd3f3",
+          "label": "registry (signer, treasury; emits MarketRegistered)"
+        },
+        {
+          "address": "0xed68f16c515ab71c09bb87e8e546b7ce83c0ccb9",
+          "label": "Uniswap v4 hook"
+        },
+        {
+          "address": "0xfd2823fbf019e9d4a121544590e00705fdae80f0",
+          "label": "seeder (emits MarketSeeded)"
+        }
+      ]
+    }
+  ]
 }
