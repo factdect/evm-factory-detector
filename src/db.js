@@ -138,6 +138,10 @@ function setUp(db, file) {
   // databases created before these columns existed
   const have = new Set(db.prepare('PRAGMA table_info(tokens)').all().map((c) => c.name));
   for (const col of ['tx_to', 'mint_to', 'v4_hook', 'platform', 'tx_from', 'claim_app', 'claim_check', 'premint']) if (!have.has(col)) db.exec(`ALTER TABLE tokens ADD COLUMN ${col} TEXT`);
+  // update-13 rows whose birth receipt still has to be read for sender and pre-mint: a small,
+  // shrinking set, so the idle probe never walks the whole table to find it
+  db.exec(`CREATE INDEX IF NOT EXISTS tokens_facts_pending ON tokens (chain_id, factory, birth_block)
+    WHERE premint IS NULL AND tx_from IS NULL AND birth_tx IS NOT NULL AND platform IS NOT NULL`);
 
   // birth_refs used to be a text table. Move it into the id form when there is room; until then the
   // old table keeps serving reads (same columns as the view) and writes go to it.
@@ -258,8 +262,12 @@ function setUp(db, file) {
     setBirthFacts: db.prepare('UPDATE tokens SET tx_from = COALESCE(?, tx_from), premint = COALESCE(?, premint) WHERE chain_id = ? AND address = ?'),
     setClaim: db.prepare('UPDATE tokens SET launchpad_id = ?, confidence = ?, claim_app = ?, claim_check = ? WHERE chain_id = ? AND address = ?'),
     // Doppler-attributed rows whose birth receipt has not been read for these facts yet
-    premintPending: db.prepare(`SELECT address, birth_tx, birth_block, factory, event_sig, platform, total_supply FROM tokens WHERE chain_id = ? AND premint IS NULL AND tx_from IS NULL
-      AND birth_tx IS NOT NULL AND platform IS NOT NULL AND factory = ? ORDER BY birth_block DESC LIMIT ?`),
+    premintPending: db.prepare(`SELECT address, birth_tx, birth_block, factory, event_sig, platform, total_supply FROM tokens INDEXED BY tokens_facts_pending
+      WHERE chain_id = ? AND premint IS NULL AND tx_from IS NULL AND birth_tx IS NOT NULL AND platform IS NOT NULL AND factory = ? AND birth_block >= ?
+      ORDER BY birth_block DESC LIMIT ?`),
+    // rows that carry a judged (or judgeable) claim of one integrator, for the boot-time re-judgement
+    claimRows: db.prepare(`SELECT address, launchpad_id, confidence, tx_from, premint, total_supply, claim_app, claim_check FROM tokens INDEXED BY tokens_factory
+      WHERE chain_id = ? AND factory = ? AND platform = ? AND (tx_from IS NOT NULL OR premint IS NOT NULL OR claim_check IS NOT NULL)`),
     getIssuerCursor: db.prepare('SELECT next_block FROM issuer_cursor WHERE chain_id = ? AND issuer = ?'),
     setIssuerCursor: db.prepare('INSERT OR REPLACE INTO issuer_cursor (chain_id, issuer, next_block) VALUES (?, ?, ?)'),
     putStock: db.prepare(`INSERT OR IGNORE INTO stock_tokens (chain_id, address, issuer, symbol, name, block, tx, beacon_ok, seen_at)

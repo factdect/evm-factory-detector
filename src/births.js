@@ -1,6 +1,6 @@
 // Records one token birth: enrich (code, metadata, receipt), attribute, persist.
 // Shared by the indexer and by on-demand lookups so both apply the same rules.
-import { judgeClaim, matchKnownEvent, pad32, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
+import { checkAllocations, claimPlacement, claimResult, judgeClaim, matchKnownEvent, pad32, parseClaim, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, storedPremint, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { fingerprint } from './fingerprint.js';
 
@@ -97,7 +97,8 @@ export class BirthRecorder {
         ...fpColumns(fp), ...meta,
         tx_to: facts.txTo, mint_to: facts.mintTo, v4_hook: facts.v4Hook, platform: match?.platformAddr ?? null,
         tx_from: facts.txFrom, claim_app: match?.claimedLaunchpadId ?? null, claim_check: match?.claimCheck ?? null,
-        premint: premint ? JSON.stringify(premint) : null,
+        // '{}' = receipt read, nothing minted outside the sale; NULL = receipt not read
+        premint: premint ? JSON.stringify(premint) : receipt ? '{}' : null,
       });
       for (const r of refsForToken(logs, token)) store.q.addRef.run(chain.id, token, r.emitter, r.topic0, r.logIndex, block ?? 0);
       store.q.markSeen.run(chain.id, token, block ?? 0, 1);
@@ -170,6 +171,38 @@ export function reattributeFromEvidence(store, registry, chainId) {
 }
 
 /**
+ * On boot: judge stored claims again against the registry as it is now, from stored facts only (no
+ * RPC). A wallet added to an app's `senders`, or an allocation option added to (or removed from)
+ * its policy, takes effect on rows already indexed. The EIP-7702 half of the wallet check needs the
+ * sender's code, so a stored result for it is kept. Returns the number of rows that changed.
+ */
+export function rejudgeStoredClaims(store, registry, chainId) {
+  let n = 0;
+  store.db.transaction(() => {
+    for (const spec of registry.platformSpecs ?? []) {
+      for (const [platform, k] of spec.platform.known) {
+        const rows = store.q.claimRows.all(chainId, spec.factory, platform);
+        for (const r of rows) {
+          const prev = parseClaim(r.claim_check);
+          const sender = r.tx_from ? r.tx_from.toLowerCase() : null;
+          const wallet = !k.wallets ? null : sender && k.wallets.senders.has(sender) ? 'verified'
+            : prev?.wallet && prev.wallet !== 'unverified' ? prev.wallet : 'unverified';
+          const allocations = checkAllocations(k.allocations, storedPremint(r.premint, r.tx_from), r.total_supply ?? null);
+          const result = claimResult(wallet, allocations);
+          const claim = result === null ? null : { result, wallet, allocations };
+          const { launchpadId, confidence } = claimPlacement(k, spec.launchpadId, claim);
+          const claimCheck = claim ? JSON.stringify(claim) : null;
+          if (claimCheck === (r.claim_check ?? null) && launchpadId === r.launchpad_id && confidence === r.confidence && r.claim_app === k.launchpad) continue;
+          store.q.setClaim.run(launchpadId, confidence, k.launchpad, claimCheck, chainId, r.address);
+          n++;
+        }
+      }
+    }
+  })();
+  return n;
+}
+
+/**
  * Idle-time job: read the launching app for tokens attributed through a protocol event before
  * this check existed (or whose record-time call failed). Also moves old rows that were credited
  * to a launchpad from the protocol event alone to wherever their integrator actually points.
@@ -180,7 +213,7 @@ export async function probePendingPlatforms({ chain, rpc, registry, store, max =
     for (const spec of specs) {
       if (!spec.platform) continue;
       for (const [emitter, entry] of spec.emitters) {
-        const rows = store.q.platformPending.all(chain.id, emitter, spec.signature, max - n).map((r) => ({ ...r, premintObj: r.premint === null ? undefined : (() => { try { return JSON.parse(r.premint); } catch { return undefined; } })() }));
+        const rows = store.q.platformPending.all(chain.id, emitter, spec.signature, max - n).map((r) => ({ ...r, premintObj: storedPremint(r.premint, r.tx_from) }));
         if (!rows.length) continue;
         const match = { platform: spec.platform, factory: emitter, launchpadId: spec.launchpadId };
         const needSender = platformNeedsSender(match);
@@ -215,7 +248,7 @@ export async function probePendingBirthFacts({ chain, rpc, registry, store, max 
     for (const spec of specs) {
       if (!spec.platform) continue;
       for (const [emitter] of spec.emitters) {
-        const rows = store.q.premintPending.all(chain.id, emitter, max - n).filter((r) => r.birth_block == null || r.birth_block >= sinceBlock);
+        const rows = store.q.premintPending.all(chain.id, emitter, sinceBlock, max - n);
         if (!rows.length) continue;
         const rcs = await rpc.batch(rows.map((r) => ({ method: 'eth_getTransactionReceipt', params: [r.birth_tx] })));
         const senders = rows.map((r, i) => (rcs[i]?.result?.from ? rcs[i].result.from.toLowerCase() : null));
@@ -233,8 +266,8 @@ export async function probePendingBirthFacts({ chain, rpc, registry, store, max 
             const k = known[i];
             if (k && (k.wallets || k.allocations)) {
               const claim = judged(k, i, premint, r.total_supply ?? null);
-              const look = claim?.result === 'failed';
-              store.q.setClaim.run(look ? spec.launchpadId : k.launchpad, look ? 'look-alike-platform' : k.status === 'confirmed' ? 'verified' : 'observed-emitter', k.launchpad, claim ? JSON.stringify(claim) : null, chain.id, r.address);
+              const { launchpadId, confidence } = claimPlacement(k, spec.launchpadId, claim);
+              store.q.setClaim.run(launchpadId, confidence, k.launchpad, claim ? JSON.stringify(claim) : null, chain.id, r.address);
             }
             n++;
           });

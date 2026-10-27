@@ -1,8 +1,9 @@
 // Turns index rows into the public JSON. The lookup page renders exactly this JSON.
-import { INFRA_ADDRESSES, INFRA_TOPICS, judgeClaim, parseClaim, platformCall, premintFacts, resolvePlatform, senderCodeCall } from './attribution.js';
+import { claimPlacement, INFRA_ADDRESSES, INFRA_TOPICS, judgeClaim, matchKnownEvent, parseClaim, platformCall, premintFacts, resolvePlatform, senderCodeCall, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { BirthRecorder } from './births.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { findCreation } from './explorer.js';
+import { getLogsRange, hex } from './rpc.js';
 
 // below this much free disk (not counting pages reusable inside the file), writes that grow a file fail soon
 const MIN_FS_FREE_BYTES = 64 * 1024 * 1024;
@@ -14,7 +15,7 @@ const VERDICTS = {
   'protocol-verified': ['Verified protocol, unlisted app', 'Created through the canonical contract of a permissionless launch protocol, by an app (integrator) that is not in the registry. The protocol part is certain; which app launched it is not a known one.'],
   'observed-platform': ['Observed launchpad', 'Created through a launch protocol by an integrator we identified on-chain as this launchpad. The launchpad has not published this address.'],
   'unverified-emitter': ['Look-alike event', 'The event signature matches a known launchpad, but the emitter is not one of its published factories. Several launchpads share signatures and anyone can emit one.'],
-  'look-alike-platform': ['Claims a launchpad it was not sent by', 'Created through a permissionless launch protocol with the integrator field set to a known launchpad, but the launch transaction was not sent by that launchpad\'s wallets. The integrator field is self-declared calldata: anyone can write another app\'s address there, and terminals that read only that field show the token as that app\'s. This is a direct protocol launch wearing the label.'],
+  'look-alike-platform': ['Claims a launchpad it was not launched by', 'Created through a permissionless launch protocol with the integrator field set to a known launchpad, but what it minted at birth is something that launchpad\'s launch flow does not produce (or, for a launchpad with no published policy, it was not sent by that launchpad\'s wallets). The integrator field is self-declared calldata: anyone can write another app\'s address there, and terminals that read only that field show the token as that app\'s. This is a direct protocol launch wearing the label.'],
   discovered: ['Unlisted factory', 'No launchpad in the registry claims this token. A contract that has announced several tokens of one template did, which is what a factory looks like.'],
   'discovered-first': ['First sighting', 'The contract that announced this token has announced no other token in this index. A one-off deployer and a brand-new factory look identical until the second token.'],
   'silent-factory': ['Unlisted silent factory', 'A contract the deployer called created and received this token, and has created other tokens the same way, without ever emitting a creation event. A factory that stays quiet is not in any launchpad registry.'],
@@ -38,6 +39,10 @@ export class Lookup {
     this.listCache = new TtlCache(30_000, 2000);
     this.countCache = new TtlCache(10_000, 32);
     this.inflight = new Map();
+    // protocol tokens whose birth a scan did not find, and rows whose birth receipt the node did not
+    // return: do not ask again on every lookup
+    this.birthMiss = new TtlCache(30 * 60_000, 5000);
+    this.factsMiss = new TtlCache(10 * 60_000, 5000);
     const db = store.db;
     this.sql = {
       // first sighting over all time (index-only MIN), activity over the stats window
@@ -279,6 +284,63 @@ export class Lookup {
     return {};
   }
 
+  /**
+   * Find and record the birth of a token that a launch protocol knows but the index does not hold.
+   * The token's own mint from address zero marks its birth: found with address-filtered getLogs,
+   * newest window first (at most BIRTH_SCAN_WINDOWS x ADDR_LOGS_SPAN blocks back, 6 windows per
+   * request), and accepted only when that transaction's receipt holds a registry creation event for
+   * this token. The birth is then recorded exactly as the indexer records it (sender, pre-mint,
+   * judged claim), so the replay later skips it. Returns the saved row, or null (nothing found,
+   * scanning disabled, or the node refused): the caller then answers from the protocol call alone.
+   */
+  async #protocolBirth(chain, addr, knownTxs = []) {
+    const rpc = this.rpcs.get(chain.id);
+    const reg = this.registries.get(chain.id);
+    const span = chain.addrLogsSpan, windows = chain.birthScanWindows;
+    const key = `${chain.id}:${addr}`;
+    if (!rpc || this.birthMiss.get(key)) return null;
+    const recordIfBirth = async (tx, block) => {
+      const receipt = await rpc.call('eth_getTransactionReceipt', [tx], { priority: true });
+      const isBirth = (receipt?.logs ?? []).some((l) => matchKnownEvent(reg, l)?.token === addr);
+      if (!isBirth) return null; // a later mint (inflation), not the launch
+      const recorder = new BirthRecorder({ chain, rpc, registry: reg, store: this.store });
+      const saved = await recorder.record(addr, block ?? Number(receipt.blockNumber), tx, 'registry-event', null, { priority: true });
+      return saved?.launchpad_id ? saved : null;
+    };
+    try {
+      // a birth transaction the index already holds (a row stored before its protocol was in the registry)
+      for (const [tx, block] of knownTxs) { const saved = await recordIfBirth(tx, block); if (saved) return saved; }
+    } catch { /* fall through to the scan */ }
+    if (!(span > 0) || !(windows > 0)) { this.birthMiss.set(key, true); return null; }
+    try {
+      let head = this.#head(chain.id);
+      if (head == null) head = Number(await rpc.call('eth_blockNumber', [], { priority: true }));
+      const ranges = [];
+      for (let i = 0, b = head; i < windows && b >= 0; i++, b -= span) ranges.push([Math.max(0, b - span + 1), b]);
+      const filter = { address: addr, topics: [TRANSFER_TOPIC, ZERO_TOPIC] };
+      const urgent = { call: (m, p) => rpc.call(m, p, { priority: true }) };
+      const byPos = (x, y) => Number(x.blockNumber) - Number(y.blockNumber) || Number(x.logIndex) - Number(y.logIndex);
+      for (let i = 0; i < ranges.length; i += 6) {
+        const group = ranges.slice(i, i + 6);
+        const res = await rpc.batch(group.map(([a, b]) => ({ method: 'eth_getLogs', params: [{ ...filter, fromBlock: hex(a), toBlock: hex(b) }] })), { priority: true });
+        for (let j = 0; j < group.length; j++) {
+          let logs = res[j]?.result;
+          // a node that refuses the span (a stated cap, a result-size limit): walk this window adaptively
+          if (!Array.isArray(logs)) logs = await getLogsRange(urgent, filter, group[j][0], group[j][1], { span, max: span }, chain.logsSoftCap);
+          if (!logs.length) continue;
+          const blockOf = new Map();
+          for (const l of logs.sort(byPos)) if (!blockOf.has(l.transactionHash)) blockOf.set(l.transactionHash, Number(l.blockNumber));
+          for (const [tx, block] of blockOf) {
+            const saved = await recordIfBirth(tx, block); // not the launch: keep looking further back
+            if (saved) return saved;
+          }
+        }
+      }
+    } catch { /* a refusing or flaky node: answer from the protocol call alone */ }
+    this.birthMiss.set(key, true);
+    return null;
+  }
+
   /** The stored pre-mint facts as shares of the total supply. */
   #premint(row) {
     if (!row.premint) return null;
@@ -288,14 +350,22 @@ export class Lookup {
     const pct = (amt) => (supply > 0n ? Number((BigInt(amt) * 10000n) / supply) / 100 : null);
     const allocations = (p.allocations ?? []).map((a) => {
       const sch = p.schedules?.[a.scheduleId] ?? null;
-      const unlocked = sch ? sch.duration === 0 : false;
+      // DopplerERC20V1 allows a duration of 0 or at least a day; anything faster is as good as unlocked
+      const unlocked = sch ? sch.cliff < 3600 && sch.duration < 86400 : false;
       return { to: a.to, amount: a.amount, pct: pct(a.amount), cliffDays: sch ? Math.round((sch.cliff / 86400) * 10) / 10 : null, vestDays: sch ? Math.round((sch.duration / 86400) * 10) / 10 : null, unlockedAtLaunch: unlocked };
     });
-    const total = allocations.reduce((s, a) => s + BigInt(a.amount), 0n);
-    if (total === 0n && !(p.escrowed && BigInt(p.escrowed) > 0n)) return null; // receipt read, nothing minted outside the sale
+    const allocated = allocations.reduce((s, a) => s + BigInt(a.amount), 0n);
+    const escrowed = BigInt(p.escrowed ?? '0');
+    // Supply minted into the token itself with no announced beneficiaries: vesting kept in storage only
+    // (an older token type). Only meaningful for a protocol launch; other tokens that mint to
+    // themselves are not pre-minting anything to anyone.
+    const unannounced = row.platform && escrowed > allocated ? escrowed - allocated : 0n;
+    const total = allocated + unannounced;
+    if (total === 0n) return null; // receipt read, nothing minted outside the sale
     const unlocked = allocations.filter((a) => a.unlockedAtLaunch).reduce((s, a) => s + BigInt(a.amount), 0n);
     const round = (x) => (x === null ? null : Math.round(x * 100) / 100);
-    return { totalPct: round(pct(total.toString())), unlockedPct: round(pct(unlocked.toString())), escrowedPct: round(pct(p.escrowed ?? '0')), allocations };
+    return { totalPct: round(pct(total.toString())), unlockedPct: round(pct(unlocked.toString())), escrowedPct: round(pct(escrowed.toString())),
+      unannouncedPct: round(pct(unannounced.toString())), allocations };
   }
 
   /**
@@ -304,14 +374,16 @@ export class Lookup {
    * Returns the updated row, or the same row when nothing could be added.
    */
   async #completeBirthFacts(chain, row) {
-    if (!row.birth_tx || row.premint !== null || row.tx_from !== null) return row;
+    if (!this.#needsBirthFacts(row)) return row;
     const rpc = this.rpcs.get(chain.id);
     const reg = this.registries.get(chain.id);
     if (!rpc) return row;
+    const key = `${chain.id}:${row.address}`;
+    if (this.factsMiss.get(key)) return row; // the node had no receipt a moment ago: do not ask on every lookup
     try {
       const [rc] = await rpc.batch([{ method: 'eth_getTransactionReceipt', params: [row.birth_tx] }], { priority: true });
       const receipt = rc?.result;
-      if (!receipt) return row;
+      if (!receipt) { this.factsMiss.set(key, true); return row; }
       const sender = receipt.from ? receipt.from.toLowerCase() : null;
       const premint = premintFacts(receipt, row.address);
       this.store.q.setBirthFacts.run(sender, premint ? JSON.stringify(premint) : '{}', chain.id, row.address);
@@ -322,15 +394,18 @@ export class Lookup {
       if (spec && known && (known.wallets || known.allocations) && parseClaim(row.claim_check)?.result !== 'verified') {
         const code = sender && known.wallets ? (await rpc.batch([senderCodeCall(sender)], { priority: true }))[0]?.result ?? null : null;
         const claim = judgeClaim(known, sender, code, premint, row.total_supply ?? null);
-        const look = claim?.result === 'failed';
-        const launchpadId = look ? spec.launchpadId : known.launchpad;
-        const confidence = look ? 'look-alike-platform' : known.status === 'confirmed' ? 'verified' : 'observed-emitter';
+        const { launchpadId, confidence } = claimPlacement(known, spec.launchpadId, claim);
         const claimCheck = claim ? JSON.stringify(claim) : null;
         this.store.q.setClaim.run(launchpadId, confidence, known.launchpad, claimCheck, chain.id, row.address);
         next = { ...next, launchpad_id: launchpadId, confidence, claim_app: known.launchpad, claim_check: claimCheck };
       }
       return next;
-    } catch { return row; }
+    } catch { this.factsMiss.set(key, true); return row; }
+  }
+
+  /** An update-13 row with a birth transaction whose receipt was never read for sender and pre-mint. */
+  #needsBirthFacts(row) {
+    return Boolean(row.birth_tx) && row.premint === null && row.tx_from === null;
   }
 
   #templateOwner(reg, fpKey) {
@@ -385,6 +460,8 @@ export class Lookup {
     if (premint?.unlockedPct >= 1) {
       const to = premint.allocations.filter((a) => a.unlockedAtLaunch).map((a) => a.to);
       warnings.push(`${premint.unlockedPct}% of the supply was minted outside the sale and could be sold from the first block (to ${to.length === 1 ? to[0] : `${to.length} wallets`}).`);
+    } else if (premint?.unannouncedPct >= 1) {
+      warnings.push(`${premint.totalPct}% of the supply was minted outside the sale; ${premint.unannouncedPct}% sits in the token contract with no announced beneficiary or schedule, so when it can be sold is not known from the launch.`);
     } else if (premint?.totalPct >= 1) {
       warnings.push(`${premint.totalPct}% of the supply was minted outside the sale (vesting; see premint).`);
     }
@@ -392,11 +469,14 @@ export class Lookup {
       const why = [];
       if (claim?.allocations === 'failed') why.push(`what was minted at birth${premint?.unlockedPct ? ` (${premint.unlockedPct}% unlocked at launch)` : ''} is not something ${claimed.name}'s launch flow produces`);
       if (claim?.wallet === 'failed') why.push(`the launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s wallets`);
+      else if (claim?.wallet === 'verified') why.push(`the sending wallet is set up like ${claimed.name}'s (an EIP-7702 delegation anyone can copy), which does not make an off-policy mint ${claimed.name}'s`);
       warnings.push(`The integrator field names ${claimed.name}, but ${why.join(', and ')}. Terminals that trust the integrator field show it as a ${claimed.name} launch.`);
     } else if (claim?.result === 'unverified' && claimed) {
-      warnings.push(claim.wallet === 'failed'
+      warnings.push(claim.wallet === 'failed' && claim.allocations === 'verified'
         ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets; what was minted at birth matches ${claimed.name}'s policy, so the label is kept but not confirmed.`
-        : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);
+        : claim.wallet === 'failed'
+          ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets, and what was minted at birth could not be read; the label is kept but not confirmed.`
+          : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);
     }
     const factoryAddr = row.factory ?? silentMaker?.address ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
     const fstats = factoryAddr ? this.#emitterInfo(chain.id, factoryAddr) : null;
@@ -458,7 +538,13 @@ export class Lookup {
   /** True when answering costs no RPC call (indexed or cached), so the rate limiter can skip it. */
   isCheap(chainId, address) {
     const a = address.toLowerCase();
-    return Boolean(this.store.q.getToken.get(Number(chainId), a)) || this.adhocCache.get(`${Number(chainId)}:${a}`) !== undefined;
+    const row = this.store.q.getToken.get(Number(chainId), a);
+    if (row) {
+      // rows a lookup completes with RPC calls (see token()) go through the rate limiter like unknown tokens
+      const live = !row.launchpad_id && (row.confidence === 'none' || row.confidence === 'discovered');
+      return !(live || (this.#needsBirthFacts(row) && !this.factsMiss.get(`${Number(chainId)}:${a}`)));
+    }
+    return this.adhocCache.get(`${Number(chainId)}:${a}`) !== undefined;
   }
 
   /** Main entry. Indexed tokens cost no RPC calls; unknown ones cost 1 batch (+1 explorer call). */
@@ -471,7 +557,11 @@ export class Lookup {
       // indexed but never attributed (born before the index, or a silent birth): a protocol may still know it
       if (!row.launchpad_id && (row.confidence === 'none' || row.confidence === 'discovered')) {
         const live = await this.#liveProtocol(chain, addr);
-        if (live.launchpad_id) return { status: 200, body: this.#shape(chain, { ...row, ...live }) };
+        if (live.launchpad_id) {
+          // a protocol launch the index holds without its creation event: find and record the real birth
+          const born = await this.#protocolBirth(chain, addr, row.birth_tx ? [[row.birth_tx, row.birth_block]] : []);
+          return { status: 200, body: this.#shape(chain, born ?? { ...row, ...live }) };
+        }
       }
       row = await this.#completeBirthFacts(chain, row);
       return { status: 200, body: this.#shape(chain, row) };
@@ -499,7 +589,15 @@ export class Lookup {
     // Not persisted: a public endpoint should not let strangers grow the database.
     const row = { address: addr, confidence: 'none', ...fpColumns(fp), ...meta };
     // No birth record, but a permissionless protocol keeps its own asset registry on-chain: ask it.
-    Object.assign(row, await this.#liveProtocol(chain, addr));
+    const live = await this.#liveProtocol(chain, addr);
+    if (live.launchpad_id) {
+      // The protocol knows it, so it is a real launch the index has not reached (born before the
+      // index started, or in a stall gap not replayed yet). Its claim and pre-mint need the birth
+      // receipt, exactly like an indexed launch: the integrator field alone is not believed.
+      const born = await this.#protocolBirth(chain, addr);
+      if (born) return { status: 200, body: this.#shape(chain, born) };
+    }
+    Object.assign(row, live);
     return { status: 200, body: this.#shape(chain, row, { adhoc: true }) };
   }
 

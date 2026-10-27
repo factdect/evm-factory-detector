@@ -85,6 +85,7 @@
     if (d.birth) field(dl, 'Created in', hexLink(d.birth.tx, 'tx'), { note: `block ${num(d.birth.block)}${d.birth.sender ? `, sent by ${short(d.birth.sender)}` : ''}` });
     if (d.premint && d.premint.totalPct != null) {
       const parts = d.premint.allocations.map((a) => `${a.pct}% → ${short(a.to)}${a.unlockedAtLaunch ? ' (unlocked at launch)' : a.vestDays != null ? ` (vesting ${a.cliffDays ? `${a.cliffDays}-day cliff, ` : ''}${a.vestDays} days)` : ''}`);
+      if (d.premint.unannouncedPct) parts.push(`${d.premint.unannouncedPct}% held by the token contract, no beneficiary or schedule announced`);
       field(dl, 'Pre-minted', `${d.premint.totalPct}% of supply`, { note: `Minted outside the sale at birth. ${parts.join('; ')}` });
     }
     const b = d.bytecode;

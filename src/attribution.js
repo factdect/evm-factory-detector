@@ -114,20 +114,28 @@ function allocationRule(a) {
     allowed: (a.allowed ?? []).map((x) => ({ pct: Number(x.pct), cliffDays: Number(x.cliffDays ?? 0), vestDays: Number(x.vestDays ?? 0) })),
     noneAllowed: a.noneAllowed !== false,
     tolerancePct: Number(a.tolerancePct ?? 0.5),
+    // how many allocations one launch may carry (Bankr: one, to the fee recipient)
+    maxAllocations: Number(a.maxAllocations ?? 1),
   };
 }
 
 /**
  * Is what was minted at birth something the app's own launch flow produces? Bankr's form offers
  * exactly two things: 15% to one wallet with a 30-day cliff over a year, or nothing. A 14% instant
- * allocation is not a Bankr launch, whoever sent it. Returns 'verified', 'failed', or 'unverified'
- * (the birth receipt has not been read, so the allocations are unknown).
+ * allocation, five 15% allocations, or 15% with no vest is not a Bankr launch, whoever sent it.
+ * Returns 'verified', 'failed', or 'unverified': the birth receipt has not been read (premint
+ * undefined), the supply is unknown, or supply was escrowed in the token without announced
+ * beneficiaries (a token type that keeps vesting in storage only), so the allocations are unknown.
  */
 export function checkAllocations(rule, premint, totalSupply) {
   if (!rule) return null;
   if (premint === undefined) return 'unverified';
   const allocs = premint?.allocations ?? [];
-  if (!allocs.length) return rule.noneAllowed ? 'verified' : 'failed';
+  const escrowed = BigInt(premint?.escrowed ?? '0');
+  const allocated = allocs.reduce((t, a) => t + BigInt(a.amount), 0n);
+  const unannounced = escrowed > allocated;
+  if (!allocs.length) return unannounced ? 'unverified' : rule.noneAllowed ? 'verified' : 'failed';
+  if (allocs.length > rule.maxAllocations) return 'failed';
   const supply = totalSupply ? BigInt(totalSupply) : 0n;
   if (supply <= 0n) return 'unverified';
   for (const a of allocs) {
@@ -138,25 +146,52 @@ export function checkAllocations(rule, premint, totalSupply) {
     const ok = rule.allowed.some((x) => Math.abs(x.pct - pct) <= rule.tolerancePct && Math.abs(x.cliffDays - cliffDays) <= 1 && Math.abs(x.vestDays - vestDays) <= 1);
     if (!ok) return 'failed';
   }
-  return 'verified';
+  return unannounced ? 'unverified' : 'verified';
 }
 
 /**
- * The verdict on an integrator claim, from both rules. A known wallet settles it. An allocation the
- * app's flow cannot produce settles it the other way, whoever sent it. A sender that is not a known
- * wallet but whose allocation is within the app's policy stays unverified: the app also launches
- * from partner and CLI keys, and a faithful copy of its template is harmless anyway.
+ * The verdict from the two checks. An allocation outside the app's policy refutes the claim even
+ * from a known wallet: anyone can delegate an EOA to the app's EIP-7702 implementation, so a
+ * delegation alone cannot vouch for an off-policy mint. A known wallet confirms an on-policy (or
+ * unknown) allocation. A sender that is not a known wallet keeps an on-policy claim unverified (the
+ * app also launches from partner and CLI keys); with no allocation policy to go by, it refutes it.
  */
+export function claimResult(wallet, allocations) {
+  if (wallet === null && allocations === null) return null;
+  if (allocations === 'failed') return 'failed';
+  if (wallet === 'verified') return 'verified';
+  if (wallet === 'failed') return allocations === null ? 'failed' : 'unverified';
+  return 'unverified';
+}
+
+/**
+ * The stored pre-mint as checkAllocations wants it: undefined = the birth receipt has not been read,
+ * null = read, nothing minted outside the sale. Rows store '{}' for the latter, except rows recorded
+ * by update-14, which stored NULL; their sender (tx_from, read from the same receipt) tells them apart.
+ */
+export function storedPremint(premintText, txFrom) {
+  if (premintText === null || premintText === undefined) return txFrom ? null : undefined;
+  try {
+    const p = JSON.parse(premintText);
+    return p && (p.allocations?.length || (p.escrowed && BigInt(p.escrowed) > 0n)) ? p : null;
+  } catch { return undefined; }
+}
+
+/** The verdict on an integrator claim, from both rules (see claimResult). */
 export function judgeClaim(k, sender, senderCode, premint, totalSupply) {
   const wallet = checkSender(k.wallets, sender, senderCode);
   const allocations = checkAllocations(k.allocations, premint, totalSupply);
-  if (wallet === null && allocations === null) return null;
-  let result;
-  if (wallet === 'verified') result = 'verified';
-  else if (allocations === 'failed') result = 'failed';
-  else if (wallet === 'failed') result = allocations === null ? 'failed' : 'unverified';
-  else result = 'unverified';
-  return { result, wallet, allocations };
+  const result = claimResult(wallet, allocations);
+  return result === null ? null : { result, wallet, allocations };
+}
+
+/** Where a judged claim puts the token: the app, or the protocol when the claim is refuted. */
+export function claimPlacement(k, protocolLaunchpadId, claim) {
+  const look = claim?.result === 'failed';
+  return {
+    launchpadId: look ? protocolLaunchpadId : k.launchpad,
+    confidence: look ? 'look-alike-platform' : k.status === 'confirmed' ? 'verified' : 'observed-emitter',
+  };
 }
 
 /**

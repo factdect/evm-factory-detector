@@ -2,7 +2,7 @@
 // ROLE=indexer / ROLE=api split them, which only makes sense when both can reach the same DB file.
 import http from 'node:http';
 import { loadRegistry } from './attribution.js';
-import { reattributeFromEvidence } from './births.js';
+import { reattributeFromEvidence, rejudgeStoredClaims } from './births.js';
 import { loadChains } from './chains.js';
 import { isDiskFull, openDb } from './db.js';
 import { Indexer } from './indexer.js';
@@ -73,6 +73,8 @@ function start(store) {
       try {
         const n = reattributeFromEvidence(store, registries.get(chain.id), chain.id);
         if (n) console.info(`[${chain.slug}] registry changed: re-attributed ${n} already-indexed tokens from stored evidence`);
+        const c = rejudgeStoredClaims(store, registries.get(chain.id), chain.id);
+        if (c) console.info(`[${chain.slug}] registry rules changed: re-judged ${c} stored integrator claims`);
       } catch (e) {
         // a full disk must not stop the API from serving what is already indexed; this runs again on the next boot
         if (!isDiskFull(e)) throw e;

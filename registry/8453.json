@@ -176,6 +176,7 @@
                     }
                   ],
                   "noneAllowed": true,
+                  "maxAllocations": 1,
                   "tolerancePct": 0.5
                 }
               }

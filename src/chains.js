@@ -3,7 +3,8 @@
 //
 // Override per chain with env vars:  RPC_<id>, RPC_HEADERS_<id> (JSON), MIN_INTERVAL_MS_<id>,
 // LOGS_CHUNK_<id>, STATE_WINDOW_<id> (0 = unlimited, use with an archive RPC), START_BLOCK_<id>,
-// MAX_LAG_BLOCKS_<id> (0 = never jump ahead after a stall).
+// MAX_LAG_BLOCKS_<id> (0 = never jump ahead after a stall), ADDR_LOGS_SPAN_<id>,
+// BIRTH_SCAN_WINDOWS_<id> (0 = a lookup never searches the birth of an unindexed protocol token).
 // Global: BACKFILL=off (do not replay stall gaps), RETAIN_REFS_DAYS (0 = keep all birth evidence),
 // MIN_FREE_MB (below this, the oldest birth evidence is pruned; default 150).
 
@@ -84,13 +85,17 @@ export function loadChains(env = process.env) {
     // We look this far back for its first log (default 7 days).
     c.addrLogsSpan = num(env[`ADDR_LOGS_SPAN_${id}`], c.addrLogsSpan ?? c.logsChunk);
     c.ageLookbackBlocks = num(env[`AGE_LOOKBACK_BLOCKS_${id}`], c.ageLookbackBlocks ?? Math.round((7 * 86400 * 1000) / c.blockTimeMs));
+    c.publicRpc = c.rpc === base?.rpc;
+    // A lookup of a protocol token the index does not hold yet searches its birth this many
+    // ADDR_LOGS_SPAN windows back (Robinhood Chain: 24 x 2,000,000 blocks = 55 days). Off on Base's
+    // public RPC, which caps every getLogs at 200 blocks; with RPC_8453 set it covers 24 x 2,000 blocks.
+    c.birthScanWindows = num(env[`BIRTH_SCAN_WINDOWS_${id}`], c.publicRpc && id === 8453 ? 0 : 24);
     // Further behind than this (default: 4 state windows, at least 30 minutes of blocks), live
     // indexing jumps ahead and the skipped blocks are replayed in the background.
     c.maxLagBlocks = num(env[`MAX_LAG_BLOCKS_${id}`], Math.max(c.stateWindow * 4, Math.round((30 * 60 * 1000) / c.blockTimeMs)));
     c.backfill = !/^(0|off|false|no)$/i.test(env.BACKFILL ?? '');
     c.retainRefsDays = num(env.RETAIN_REFS_DAYS, 0);
     c.minFreeBytes = num(env.MIN_FREE_MB, 150) * 1024 * 1024;
-    c.publicRpc = c.rpc === base?.rpc;
     out.set(id, c);
   }
   if (out.size === 0) throw new Error('CHAINS is empty. Example: CHAINS=4663 or CHAINS=4663,8453');

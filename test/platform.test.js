@@ -3,8 +3,8 @@
 // first thing a buyer needs to know (DRS: 24% unlocked at launch, dumped 4 minutes in).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkAllocations, checkSender, loadRegistry, matchKnownEvent, pad32, platformNeedsSender, premintFacts, resolvePlatform } from '../src/attribution.js';
-import { BirthRecorder, probePendingBirthFacts, probePendingPlatforms } from '../src/births.js';
+import { checkAllocations, checkSender, judgeClaim, loadRegistry, matchKnownEvent, pad32, platformNeedsSender, premintFacts, resolvePlatform, storedPremint } from '../src/attribution.js';
+import { BirthRecorder, probePendingBirthFacts, probePendingPlatforms, rejudgeStoredClaims } from '../src/births.js';
 import { openDb } from '../src/db.js';
 import { Lookup } from '../src/lookup.js';
 
@@ -84,9 +84,10 @@ test('judgeClaim + resolvePlatform: a Bankr wallet settles it; an off-policy all
   // the six bankr.bot-listed launches from plain EOAs (partner / CLI keys): on-policy, so the label is kept, unconfirmed
   const partner = resolvePlatform(m, assetData(BANKR), '0x732971d59ec5ff899c9bf458b99210240b03b115', '0x', null, SUPPLY);
   assert.deepEqual([partner.launchpadId, partner.confidence, JSON.parse(partner.claimCheck)], ['bankr', 'observed-emitter', { result: 'unverified', wallet: 'failed', allocations: 'verified' }]);
-  // a Bankr wallet with an off-policy allocation would mean Bankr changed its product: still Bankr
-  const changed = resolvePlatform(m, assetData(BANKR), '0xbad608307d46fb8e9d878428ca138542861adfea', code7702(BANKR_7702), INSTANT_24, SUPPLY);
-  assert.equal(JSON.parse(changed.claimCheck).result, 'verified');
+  // an off-policy allocation from a wallet delegated to Bankr's implementation: anyone can delegate an
+  // EOA there (EIP-7702 is signed by the EOA itself), so the delegation cannot vouch for the mint
+  const copied = resolvePlatform(m, assetData(BANKR), '0x' + '77'.repeat(20), code7702(BANKR_7702), INSTANT_24, SUPPLY);
+  assert.deepEqual([copied.launchpadId, copied.confidence, JSON.parse(copied.claimCheck)], ['doppler', 'look-alike-platform', { result: 'failed', wallet: 'verified', allocations: 'failed' }]);
   const unknown = resolvePlatform(m, assetData(BANKR), null, null);
   assert.deepEqual([unknown.launchpadId, unknown.confidence, JSON.parse(unknown.claimCheck).result], ['bankr', 'observed-emitter', 'unverified'], 'no sender, no receipt (live lookup): the claim stands, marked unverified');
   const long = resolvePlatform(m, assetData('0x92d435c96e63c43e12d6d0ab28f6b0b04072f765'), LAUNCHER, '0x', INSTANT_24, SUPPLY);
@@ -208,9 +209,182 @@ test('older rows: the idle probe and a first lookup read the birth receipt once,
   const rpc2 = { batch: async (cs) => cs.map((c) => ({ result: c.method === 'eth_call' ? assetData(BANKR) : '0x' })) };
   assert.equal(await probePendingPlatforms({ chain, rpc: rpc2, registry: reg, store }), 1);
   assert.deepEqual([store.q.getToken.get(4663, T3).launchpad_id, JSON.parse(store.q.getToken.get(4663, T3).claim_check)], ['doppler', { result: 'failed', wallet: 'failed', allocations: 'failed' }]);
-  // a row with the sender stored but no receipt read yet: an off-wallet sender alone is not a verdict
+  // a row recorded by update-14 from a receipt with no allocations: the sender is stored, premint NULL
+  // (update-14 wrote NULL for "nothing minted"; tx_from comes from the same receipt, so it was read)
   const T4 = '0x' + '67'.repeat(20);
   store.saveToken({ chain_id: 4663, address: T4, confidence: 'verified', launchpad_id: 'doppler', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', birth_block: 1, birth_tx: '0x2', birth_source: 'registry-event', tx_from: LAUNCHER, total_supply: SUPPLY });
   assert.equal(await probePendingPlatforms({ chain, rpc: rpc2, registry: reg, store }), 1);
-  assert.deepEqual([store.q.getToken.get(4663, T4).launchpad_id, JSON.parse(store.q.getToken.get(4663, T4).claim_check)], ['bankr', { result: 'unverified', wallet: 'failed', allocations: 'unverified' }]);
+  assert.deepEqual([store.q.getToken.get(4663, T4).launchpad_id, JSON.parse(store.q.getToken.get(4663, T4).claim_check)], ['bankr', { result: 'unverified', wallet: 'failed', allocations: 'verified' }]);
+});
+
+// update-15: a lookup of a protocol token the index has not reached (born before the index, or in a
+// stall gap) used to answer from the integrator field alone: "Bankr, unverified", no pre-mint.
+const BIRTH_TX = '0xaa9ac19631e69bdf496e04a5289e8940be75ce20f30e5f89cb88e712291b3bd8';
+const scanChain = () => ({ ...chainOf(), addrLogsSpan: 2_000_000, birthScanWindows: 24, logsSoftCap: 9500 });
+function scanRpc({ head, mints, receipts }) {
+  const seen = { getLogs: [], receipts: [] };
+  const answer = (c) => {
+    if (c.method === 'eth_blockNumber') return { result: '0x' + head.toString(16) };
+    if (c.method === 'eth_getLogs') {
+      const f = c.params[0]; const a = Number(f.fromBlock), b = Number(f.toBlock);
+      seen.getLogs.push([a, b]);
+      return { result: mints.filter((l) => l.address === f.address && Number(l.blockNumber) >= a && Number(l.blockNumber) <= b) };
+    }
+    if (c.method === 'eth_getTransactionReceipt') { seen.receipts.push(c.params[0]); return { result: receipts[c.params[0]] ?? null }; }
+    if (c.method === 'eth_getCode') return { result: c.params[0] === DRS ? '0x3d3d3d3d363d3d37363d733be8b97fd0e713b5abe0649fa830223b6b4bc5995af43d3d93803e602a57fd5bf3' : '0x' };
+    if (c.method === 'eth_call' && c.params[0].to === AIRLOCK) return { result: assetData(BANKR) };
+    if (c.method === 'eth_call') return metaOf(c);
+    return { result: '0x' };
+  };
+  const batch = async (cs) => cs.map(answer);
+  return { seen, batch, call: async (m, p) => (await batch([{ method: m, params: p }]))[0].result };
+}
+const mintLog = (block, tx, i = 0) => ({ address: DRS, topics: [XFER, '0x' + '0'.repeat(64), pad32(DRS)], data: '0x' + w('0x1'), blockNumber: '0x' + block.toString(16), transactionHash: tx, logIndex: '0x' + i.toString(16) });
+
+test('unindexed protocol token: the lookup finds its birth by its own mint log, records it like the indexer, and judges the claim (DRS: look-alike, 24% unlocked)', async () => {
+  const store = openDb(':memory:');
+  const chain = scanChain();
+  const rpc = scanRpc({ head: 99_000_000, mints: [mintLog(98672092, BIRTH_TX)],
+    receipts: { [BIRTH_TX]: { from: LAUNCHER, to: AIRLOCK, blockNumber: '0x' + (98672092).toString(16), logs: [...drsLogs(), createLog()] } } });
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  const b = (await lk.token(4663, DRS)).body;
+  assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.claims?.name, b.premint.unlockedPct, b.birth.tx, b.birth.sender], ['look-alike-platform', 'doppler', 'Bankr', 24, BIRTH_TX, LAUNCHER]);
+  assert.equal(rpc.seen.getLogs.length, 6, 'one request of 6 windows: the birth was in the newest');
+  const row = store.q.getToken.get(4663, DRS);
+  assert.deepEqual([row.birth_block, row.birth_source, JSON.parse(row.claim_check).result], [98672092, 'registry-event', 'failed'], 'recorded like an indexed launch, so the replay skips it');
+});
+
+test('unindexed protocol token: a later mint without the creation event is skipped and the scan goes further back; nothing found falls back to the protocol call', async () => {
+  const store = openDb(':memory:');
+  const chain = scanChain();
+  const LATER = '0x' + 'cd'.repeat(32);
+  const old = 99_000_000 - 8 * 2_000_000 - 5; // in the 9th window: second request
+  const rpc = scanRpc({ head: 99_000_000, mints: [mintLog(old, BIRTH_TX), mintLog(98_999_000, LATER)],
+    receipts: { [LATER]: { from: DUMPER, logs: [mintLog(98_999_000, LATER)] }, [BIRTH_TX]: { from: LAUNCHER, to: AIRLOCK, blockNumber: '0x' + old.toString(16), logs: [...drsLogs(), createLog()] } } });
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  const b = (await lk.token(4663, DRS)).body;
+  assert.deepEqual([b.verdict.code, b.birth.block, b.premint.unlockedPct], ['look-alike-platform', old, 24]);
+  assert.equal(rpc.seen.getLogs.length, 12);
+  assert.equal(rpc.seen.receipts[0], LATER, 'the newer mint was checked first and rejected');
+
+  // no mint anywhere in reach: the answer is the protocol call alone, unverified, and is not rescanned
+  const store2 = openDb(':memory:');
+  const rpc2 = scanRpc({ head: 99_000_000, mints: [], receipts: {} });
+  const lk2 = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc2]]), registries: new Map([[4663, reg]]), store: store2 });
+  const b2 = (await lk2.token(4663, DRS)).body;
+  assert.deepEqual([b2.launchpad.id, b2.factory.platform.claimCheck, b2.premint], ['bankr', 'unverified', null]);
+  assert.equal(rpc2.seen.getLogs.length, 24);
+  assert.equal(store2.q.getToken.get(4663, DRS), undefined, 'nothing persisted without a birth');
+  // scanning off (Base on its public RPC): no getLogs at all
+  const rpc3 = scanRpc({ head: 99_000_000, mints: [mintLog(98672092, BIRTH_TX)], receipts: {} });
+  const lk3 = new Lookup({ chains: new Map([[4663, { ...chain, birthScanWindows: 0 }]]), rpcs: new Map([[4663, rpc3]]), registries: new Map([[4663, reg]]), store: openDb(':memory:') });
+  await lk3.token(4663, DRS);
+  assert.equal(rpc3.seen.getLogs.length, 0);
+});
+
+test('chains: the birth scan is on for Robinhood Chain, off for Base on its public RPC, on with a private one', async () => {
+  const { loadChains } = await import('../src/chains.js');
+  assert.equal(loadChains({ CHAINS: '4663' }).get(4663).birthScanWindows, 24);
+  assert.equal(loadChains({ CHAINS: '8453' }).get(8453).birthScanWindows, 0);
+  assert.equal(loadChains({ CHAINS: '8453', RPC_8453: 'https://example.invalid' }).get(8453).birthScanWindows, 24);
+  assert.equal(loadChains({ CHAINS: '4663', BIRTH_SCAN_WINDOWS_4663: '0' }).get(4663).birthScanWindows, 0);
+});
+
+// update-15: the review of update-14
+test('policy: five 15% allocations are not Bankr\'s one; escrow with no announced beneficiary is unknown, not "none"', () => {
+  const m = matchKnownEvent(reg, createLog());
+  const k = m.platform.known.get(BANKR);
+  const five = premintOf([1, 2, 3, 4, 5].map((i) => ({ to: '0x' + String(i).repeat(40), scheduleId: '1', amount: '15000000000000000000000000000' })));
+  assert.equal(checkAllocations(k.allocations, five, SUPPLY), 'failed');
+  assert.deepEqual(judgeClaim(k, LAUNCHER, '0x', five, SUPPLY), { result: 'failed', wallet: 'failed', allocations: 'failed' });
+  const hidden = { escrowed: '50000000000000000000000000000', schedules: {}, allocations: [] };
+  assert.equal(checkAllocations(k.allocations, hidden, SUPPLY), 'unverified');
+  assert.deepEqual(judgeClaim(k, LAUNCHER, '0x', hidden, SUPPLY), { result: 'unverified', wallet: 'failed', allocations: 'unverified' });
+  // Bankr's own launch escrows exactly what it allocates
+  assert.equal(checkAllocations(k.allocations, { ...BANKR_15, escrowed: '15000000000000000000000000000' }, SUPPLY), 'verified');
+});
+
+test('storedPremint: NULL with a stored sender means "read, nothing minted" (update-14 rows); NULL without one means "not read"', () => {
+  assert.equal(storedPremint(null, LAUNCHER), null);
+  assert.equal(storedPremint(null, null), undefined);
+  assert.equal(storedPremint('{}', null), null);
+  assert.equal(storedPremint('{"escrowed":"0","schedules":{},"allocations":[]}', LAUNCHER), null);
+  assert.deepEqual(storedPremint(JSON.stringify(BANKR_15), LAUNCHER), BANKR_15);
+  assert.equal(storedPremint('not json', LAUNCHER), undefined);
+});
+
+test('premint on the page: a near-instant schedule counts as unlocked; unannounced escrow is shown for protocol launches only', async () => {
+  const store = openDb(':memory:');
+  const chain = chainOf();
+  const base = { chain_id: 4663, confidence: 'verified', birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event', total_supply: SUPPLY, tx_from: LAUNCHER, name: 'X', symbol: 'X', decimals: 18 };
+  const A = '0x' + 'a1'.repeat(20), B = '0x' + 'b2'.repeat(20), C = '0x' + 'c3'.repeat(20);
+  store.saveToken({ ...base, address: A, launchpad_id: 'doppler', factory: AIRLOCK, platform: '0x' + '99'.repeat(20),
+    premint: JSON.stringify({ escrowed: '40000000000000000000000000000', schedules: { 0: { cliff: 0, duration: 1 } }, allocations: [{ to: DUMPER, scheduleId: '0', amount: '40000000000000000000000000000' }] }) });
+  store.saveToken({ ...base, address: B, launchpad_id: 'doppler', factory: AIRLOCK, platform: '0x' + '99'.repeat(20), premint: JSON.stringify({ escrowed: '50000000000000000000000000000', schedules: {}, allocations: [] }) });
+  store.saveToken({ ...base, address: C, launchpad_id: null, confidence: 'discovered', premint: JSON.stringify({ escrowed: '100000000000000000000000000000', schedules: {}, allocations: [] }) });
+  const rpc = { batch: async (cs) => cs.map(() => ({ result: '0x' })), call: async () => '0x' };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  const a = (await lk.token(4663, A)).body;
+  assert.deepEqual([a.premint.unlockedPct, a.premint.allocations[0].unlockedAtLaunch], [40, true], '1-second vest = unlocked');
+  assert.match(a.verdict.warnings[0], /40% of the supply .* could be sold from the first block/);
+  const b = (await lk.token(4663, B)).body;
+  assert.deepEqual([b.premint.totalPct, b.premint.unannouncedPct], [50, 50]);
+  assert.match(b.verdict.warnings[0], /no announced beneficiary or schedule/);
+  const c = (await lk.token(4663, C)).body;
+  assert.equal(c.premint, null, 'a non-protocol token minting to itself pre-mints nothing to anyone');
+});
+
+test('indexed but unattributed: a row stored before its protocol was in the registry is recorded from its own birth tx on lookup (no scan needed)', async () => {
+  const store = openDb(':memory:');
+  const chain = { ...chainOf(), addrLogsSpan: 2_000_000, birthScanWindows: 0, logsSoftCap: 9500 };
+  // as update-13 stored a Base Doppler launch: 'discovered', birth tx known, no evidence refs
+  store.saveToken({ chain_id: 4663, address: DRS, confidence: 'discovered', birth_block: 98672092, birth_tx: BIRTH_TX, birth_source: 'registry-event', total_supply: '100000000000000000000000000000' });
+  const rpc = scanRpc({ head: 99_000_000, mints: [], receipts: { [BIRTH_TX]: { from: LAUNCHER, to: AIRLOCK, blockNumber: '0x' + (98672092).toString(16), logs: [...drsLogs(), createLog()] } } });
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  assert.equal(lk.isCheap(4663, DRS), false, 'a lookup that spends RPC calls goes through the rate limiter');
+  const b = (await lk.token(4663, DRS)).body;
+  assert.deepEqual([b.verdict.code, b.premint.unlockedPct, rpc.seen.getLogs.length], ['look-alike-platform', 24, 0]);
+  assert.equal(store.q.getToken.get(4663, DRS).confidence, 'look-alike-platform', 'stored: the next lookup is free');
+  assert.equal(lk.isCheap(4663, DRS), true);
+});
+
+test('update-13 rows: completing them is rate-limited, and a missing receipt is not asked for on every lookup', async () => {
+  const store = openDb(':memory:');
+  const chain = chainOf();
+  store.saveToken({ chain_id: 4663, address: DRS, confidence: 'observed-emitter', launchpad_id: 'bankr', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)',
+    platform: BANKR, birth_block: 98672092, birth_tx: BIRTH_TX, birth_source: 'registry-event', total_supply: SUPPLY });
+  let receipts = 0;
+  const rpc = { batch: async (cs) => cs.map((c) => { if (c.method === 'eth_getTransactionReceipt') receipts++; return { result: null }; }), call: async () => null };
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  assert.equal(lk.isCheap(4663, DRS), false);
+  await lk.token(4663, DRS); await lk.token(4663, DRS); await lk.token(4663, DRS);
+  assert.equal(receipts, 1);
+  assert.equal(lk.isCheap(4663, DRS), true, 'nothing left to spend for a while');
+});
+
+test('boot: stored claims are judged again when the registry changes, from stored facts only', () => {
+  const store = openDb(':memory:');
+  const r2 = loadRegistry(4663);
+  const k = r2.byTopic0.get(CREATE_T0)[0].platform.known.get(BANKR);
+  const row = (address, tx_from, premint, claim) => ({ chain_id: 4663, address, factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', platform: BANKR, birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event',
+    total_supply: SUPPLY, tx_from, premint, claim_app: 'bankr', claim_check: JSON.stringify(claim), ...(claim.result === 'failed' ? { launchpad_id: 'doppler', confidence: 'look-alike-platform' } : { launchpad_id: 'bankr', confidence: 'observed-emitter' }) });
+  const P = '0x' + '81'.repeat(20), Q = '0x' + '82'.repeat(20), R = '0x' + '83'.repeat(20);
+  store.saveToken(row(P, '0x732971d59ec5ff899c9bf458b99210240b03b115', JSON.stringify(BANKR_15), { result: 'unverified', wallet: 'failed', allocations: 'verified' }));
+  store.saveToken(row(Q, LAUNCHER, JSON.stringify(INSTANT_24), { result: 'failed', wallet: 'failed', allocations: 'failed' }));
+  store.saveToken(row(R, '0xbad608307d46fb8e9d878428ca138542861adfea', JSON.stringify(INSTANT_24), { result: 'verified', wallet: 'verified', allocations: 'failed' })); // judged by update-14's order
+  assert.equal(rejudgeStoredClaims(store, r2, 4663), 1, 'R: an off-policy mint from a 7702 wallet is now a look-alike');
+  assert.deepEqual([store.q.getToken.get(4663, R).launchpad_id, JSON.parse(store.q.getToken.get(4663, R).claim_check).result], ['doppler', 'failed']);
+  k.wallets.senders.add('0x732971d59ec5ff899c9bf458b99210240b03b115'); // a partner key added to the registry
+  assert.equal(rejudgeStoredClaims(store, r2, 4663), 1);
+  assert.deepEqual(JSON.parse(store.q.getToken.get(4663, P).claim_check), { result: 'verified', wallet: 'verified', allocations: 'verified' });
+  assert.equal(store.q.getToken.get(4663, Q).confidence, 'look-alike-platform', 'unchanged');
+  assert.equal(rejudgeStoredClaims(store, r2, 4663), 0, 'idempotent');
+});
+
+test('premintPending: rows outside the window are not selected, and the query uses the small partial index', () => {
+  const store = openDb(':memory:');
+  for (const [i, block] of [[1, 100], [2, 5000]]) store.saveToken({ chain_id: 4663, address: '0x' + String(i).repeat(40), confidence: 'observed-emitter', launchpad_id: 'bankr', factory: AIRLOCK, platform: BANKR, birth_block: block, birth_tx: '0x' + i });
+  assert.deepEqual(store.q.premintPending.all(4663, AIRLOCK, 1000, 8).map((r) => r.birth_block), [5000]);
+  const plan = store.db.prepare(`EXPLAIN QUERY PLAN ${store.q.premintPending.source}`).all(4663, AIRLOCK, 0, 8).map((r) => r.detail).join(' ');
+  assert.match(plan, /tokens_facts_pending/);
 });
