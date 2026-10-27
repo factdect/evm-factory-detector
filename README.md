@@ -39,6 +39,21 @@ Registry `registry/8453.json` ships with Hydrex (Hydropump launcher, `confirmed`
 
 A helper contract that only fires for some of a launcher's tokens (for example a fee registry that logs non-default choices) is folded into that launcher's system by containment, rather than being reported as a separate new factory.
 
+### A claimed app is not a launch
+
+Permissionless protocols record which app launched a token in a field the launcher fills in itself (Doppler: `getAssetData(asset).integrator`). Anyone calling the Airlock directly can write Bankr's address there, and terminals that read only that field then show the token as a Bankr launch. On Robinhood Chain, 19 of 78 "Bankr" launches in 55 hours (2026-10-25..27) were exactly that: direct Airlock calls with a copy of Bankr's template, from wallets Bankr never uses, none of them listed on bankr.bot, and all 19 carried 14–50% of the supply minted to a wallet that could sell from the first block. One of them (DRS) was dumped 4 minutes after launch, taking 81% of everything buyers had paid in.
+
+So a known integrator can carry two rules in the registry, and a claim is judged against both:
+
+- `platform.known[app].wallets`: the launch senders the app itself uses, as plain addresses (`senders`: Bankr's hot wallets on Base) or as an EIP-7702 delegation target (`eip7702Delegates`: on Robinhood Chain every launch from a Bankr-managed wallet is sent by an EOA delegated to `0xd6ce…5b28`). At birth the indexer reads the launch sender from the receipt and fetches its code (one call). A sender on the list **confirms** the claim.
+- `platform.known[app].allocations`: what the app's launch flow can mint at birth. Bankr's form offers exactly two things (15% to the fee recipient with a 30-day cliff and a 1-year vest, or nothing), so `allowed: [{ pct: 15, cliffDays: 30, vestDays: 365 }]`, `noneAllowed: true`, `tolerancePct: 0.5`. An allocation outside the policy (24% unlocked at launch, 15% with no vest, 14% vested) **refutes** the claim, whoever sent it.
+
+A sender off the list alone is not a verdict: Bankr also launches from plain EOAs (partner and CLI keys; 6 of the 78 launches, all listed on bankr.bot, all on-policy). The outcome is stored as `claim_check` (`{ result, wallet, allocations }`): wallet confirmed → the app's label; allocation off-policy → `look-alike-platform`, credited to the protocol, with `factory.platform.claims` naming the app the field pretends to be and `verdict.warnings` saying which rule failed; wallet off-list but allocation on-policy → the label is kept with `claimCheck: "unverified"` and a note; nothing checkable (a live lookup with no birth transaction, or an app without rules) → unverified or no check at all. Tokens indexed before this check are completed on their first lookup (one receipt read) and by an idle-time probe over the stats window.
+
+### Pre-mint: supply that can be sold from the first block
+
+A bonding curve only prices what is sold through it. Doppler's token (DopplerERC20V1) can mint up to 80% of the supply to any wallets at birth, under vesting schedules whose duration may be 0 ("instant"). Those allocations are events in the birth receipt, so every Doppler launch gets `premint`: the share minted outside the sale, the share unlocked at launch, and each allocation with its cliff and duration. The page shows it as "Pre-minted: 25% of supply; 24% → 0xbe51… (unlocked at launch); 1% → 0xa032… (vesting 30-day cliff, 365 days)", and `verdict.warnings` leads with it. Bankr's own launches carry 15% with a 30-day cliff and a 1-year vest, which shows as 15% pre-minted, 0% unlocked.
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -50,6 +65,7 @@ A helper contract that only fires for some of a launcher's tokens (for example a
 | `protocol-verified` | Canonical protocol contract (e.g. Doppler Airlock), launched by an app not in the registry |
 | `observed-platform` | Protocol launch by an integrator we identified on-chain as a launchpad, not published by it |
 | `unverified-emitter` | Matching event, unlisted emitter, different code. Never shown as the launchpad |
+| `look-alike-platform` | Protocol launch whose integrator field names a known app, but what was minted at birth is outside that app's allocation policy (or, for an app with no policy, the sender is not one of its wallets). Credited to the protocol; the claimed app is shown as a claim |
 | `discovered` | No registry match. A contract that announced several same-template tokens announced this one |
 | `discovered-first` | The announcing contract has announced exactly one token. One-off deployer or brand-new factory |
 | `discovered-silent` | Born and minted in one transaction, nobody announced it |
@@ -134,7 +150,7 @@ Append to `registry/<chainId>.json`:
 }
 ```
 
-`token` says where the token address sits: `{ "from": "topic", "index": n }` or `{ "from": "data", "word": n }`. If the slot is wrong the indexer notices (the address does not behave like an ERC-20), logs a warning, and attributes nothing. Every emitter carries a `source`. Only fill `url` when you verified it: a wrong link in a provenance tool is a phishing vector.
+`token` says where the token address sits: `{ "from": "topic", "index": n }` or `{ "from": "data", "word": n }`. A protocol event carries `platform` (the call that names the launching app, and `known` apps by integrator address); a known app may carry `wallets` (`senders`, `eip7702Delegates`) and `allocations` (`allowed[{pct,cliffDays,vestDays}]`, `noneAllowed`, `tolerancePct`) so that a claim is confirmed by the sender or refuted by the birth allocations rather than believed. If the slot is wrong the indexer notices (the address does not behave like an ERC-20), logs a warning, and attributes nothing. Every emitter carries a `source`. Only fill `url` when you verified it: a wrong link in a provenance tool is a phishing vector.
 
 Workflow for a new factory: it shows up under `/api/v1/candidates` with `status: "new"`, you open a sample token's birth transaction, find the launchpad's own docs for that address, then add it with its source. Restart to reload. On boot, tokens already indexed as `discovered` are re-attributed from the evidence stored with their birth (no RPC calls), so promoting a candidate immediately labels every token it has made since the index saw it.
 

@@ -16,7 +16,7 @@
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
   // Only a verified/observed launchpad is 'ok' (teal). Everything unproven is 'warn' (amber);
   // a look-alike event is 'bad' (red). A bare direct deploy is never neutral.
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'evidence-pruned': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', 'look-alike-platform': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'evidence-pruned': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
   const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
@@ -54,7 +54,10 @@
     const dl = $('fields');
     dl.replaceChildren();
     const MAKER = { discovered: 'Unlisted factory', 'discovered-first': 'New or one-off deployer', 'discovered-silent': 'Nobody announced it', 'unverified-emitter': 'Unverified', 'code-match': 'Unverified' };
-    const maker = d.verdict.code === 'protocol-verified' ? `${d.launchpad?.name ?? 'Protocol'}, unlisted app` : d.launchpad?.name ?? (d.likelyLaunchpad ? `${d.likelyLaunchpad.name}?` : MAKER[d.verdict.code] ?? 'Unknown');
+    const claims = d.factory?.platform?.claims;
+    const maker = d.verdict.code === 'protocol-verified' ? `${d.launchpad?.name ?? 'Protocol'}, unlisted app`
+      : d.verdict.code === 'look-alike-platform' ? `${d.launchpad?.name ?? 'Protocol'} direct, labelled "${claims?.name ?? 'an app'}"`
+      : d.launchpad?.name ?? (d.likelyLaunchpad ? `${d.likelyLaunchpad.name}?` : MAKER[d.verdict.code] ?? 'Unknown');
     field(dl, 'Maker', maker, {
       big: true,
       note: d.launchpad?.stack ?? (d.likelyLaunchpad ? `Template shared with ${num(d.likelyLaunchpad.tokens)} ${d.likelyLaunchpad.name} tokens. A template can be copied, so this is not proof.` : null),
@@ -63,7 +66,14 @@
       const bits = [];
       if (d.factory.label) bits.push(d.factory.label);
       if (d.factory.silent) bits.push(`emits no creation event; made ${plural(d.factory.tokensMade, 'token', 'tokens')} this way recently${d.factory.topNames?.length ? `, e.g. ${d.factory.topNames.slice(0, 3).map((n) => `"${n.name}"${n.tokens > 1 ? ` ×${n.tokens}` : ''}`).join(', ')}` : ''}`);
-      if (d.factory.platform?.integrator) bits.push(d.factory.platform.status === 'unlisted' ? `launched by unlisted app ${short(d.factory.platform.integrator)}` : `app ${short(d.factory.platform.integrator)}`);
+      if (d.factory.platform?.integrator) {
+        const p = d.factory.platform;
+        if (p.status === 'unlisted') bits.push(`launched by unlisted app ${short(p.integrator)}`);
+        else if (p.status === 'look-alike') bits.push(`integrator field names ${p.claims?.name ?? short(p.integrator)}${p.allocationCheck === 'failed' ? ', with an allocation its launch flow does not produce' : ''}${p.senderCheck === 'failed' ? `, sent by ${p.sender ? short(p.sender) : 'a wallet'} that is not one of its wallets` : ''}`);
+        else bits.push(`app ${short(p.integrator)}${p.senderCheck === 'verified' ? `, launch sent by a ${p.claims?.name ?? 'known'} wallet`
+          : p.senderCheck === 'failed' ? `, launch sender not a known ${p.claims?.name ?? 'app'} wallet${p.allocationCheck === 'verified' ? ' (allocation within its policy, label kept)' : ''}`
+          : p.claimCheck === 'unverified' ? ', launch sender not checked' : ''}`);
+      }
       if (d.factory.event) bits.push(`event ${d.factory.event.split('(')[0]}`);
       if (d.factory.tokensAnnounced != null) bits.push(`${plural(d.factory.tokensAnnounced, 'token', 'tokens')} announced recently`);
       if (d.factory.firstSeenAgoSec != null) bits.push(`first seen ${ago(d.factory.firstSeenAgoSec)}`);
@@ -72,7 +82,11 @@
     }
     const t = d.token;
     field(dl, 'Token', hexLink(t.address), { note: [[t.name, t.symbol ? `(${t.symbol})` : null].filter(Boolean).join(' ') || 'No ERC-20 name', t.sameNameElsewhere ? `the same name and symbol is on ${plural(t.sameNameElsewhere, 'other token contract', 'other token contracts')}: check you have the right one` : null].filter(Boolean).join('. ') });
-    if (d.birth) field(dl, 'Created in', hexLink(d.birth.tx, 'tx'), { note: `block ${num(d.birth.block)}` });
+    if (d.birth) field(dl, 'Created in', hexLink(d.birth.tx, 'tx'), { note: `block ${num(d.birth.block)}${d.birth.sender ? `, sent by ${short(d.birth.sender)}` : ''}` });
+    if (d.premint && d.premint.totalPct != null) {
+      const parts = d.premint.allocations.map((a) => `${a.pct}% → ${short(a.to)}${a.unlockedAtLaunch ? ' (unlocked at launch)' : a.vestDays != null ? ` (vesting ${a.cliffDays ? `${a.cliffDays}-day cliff, ` : ''}${a.vestDays} days)` : ''}`);
+      field(dl, 'Pre-minted', `${d.premint.totalPct}% of supply`, { note: `Minted outside the sale at birth. ${parts.join('; ')}` });
+    }
     const b = d.bytecode;
     const pattern = b.kind === 'minimal-proxy' ? `${b.size}-byte clone of ${short(b.implementation)}` : `${num(b.size)}-byte ${b.kind === 'eip1967-proxy' ? 'upgradeable proxy' : 'contract'}`;
     // the cluster counts this token too when it is indexed
@@ -93,6 +107,11 @@
     stamp.classList.add('press');
     $('plate').hidden = false;
     $('detail').textContent = d.verdict.detail;
+    const warn = $('warnings');
+    if (warn) {
+      warn.replaceChildren(...(d.verdict.warnings ?? []).map((w) => el('li', { text: w })));
+      warn.hidden = !(d.verdict.warnings?.length);
+    }
   }
 
   function table(node, heads, rows, empty) {
@@ -175,8 +194,9 @@
       const onlyUnlisted = $('unlisted-only')?.checked;
       const { tokens, unlisted } = await api(`/api/v1/recent/${chainId}?limit=25${onlyUnlisted ? '&attributed=false' : ''}`);
       const rowOf = (t) => { const tr = pickable(el('tr', {},
-        el('td', {}, el('strong', { text: t.symbol || '(no symbol)' }), el('div', { class: 'hex', text: short(t.address) })),
-        el('td', {}, t.launchpad ? tag(t.launchpad, TONE[t.confidence] ?? 'warn') : tag((t.confidence || '').startsWith('discovered') ? 'Unlisted' : t.confidence === 'unverified-emitter' ? 'Look-alike' : 'Unverified', t.confidence === 'unverified-emitter' ? 'bad' : 'warn')),
+        el('td', {}, el('strong', { text: t.symbol || '(no symbol)' }), t.unlockedPct ? el('span', { class: 'badge', text: `${t.unlockedPct}% unlocked`, title: `${t.unlockedPct}% of the supply was minted outside the sale and could be sold from the first block` }) : null, el('div', { class: 'hex', text: short(t.address) })),
+        el('td', {}, t.claims ? el('div', {}, tag(`Claims ${t.claims}`, 'bad'), el('div', { class: 'sub', text: `${t.launchpad ?? 'protocol'} direct` }))
+          : t.launchpad ? tag(t.launchpad, TONE[t.confidence] ?? 'warn') : tag((t.confidence || '').startsWith('discovered') ? 'Unlisted' : t.confidence === 'unverified-emitter' ? 'Look-alike' : 'Unverified', t.confidence === 'unverified-emitter' ? 'bad' : 'warn')),
         el('td', { class: 'num', text: num(t.birthBlock) }),
         el('td', { text: t.bytecodeKind === 'minimal-proxy' ? `${t.codeSize}-byte clone` : `${num(t.codeSize)} bytes` }),
       ), t.address); if (t.unlisted) tr.classList.add('unlisted'); return tr; };

@@ -82,7 +82,9 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
       for (const [addr, e] of emitters) factoryOf.set(addr, { launchpadId: lp.id, label: e.label });
       const platform = ev.platform ? {
         abi: [parseAbiItem(ev.platform.call)], field: ev.platform.field, name: ev.platform.name ?? 'platform',
-        known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), v])),
+        // An integrator address is self-declared calldata: anyone can write Bankr's address there.
+        // `wallets` says which launch senders the app itself uses; a claim from any other sender is a look-alike.
+        known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), { ...v, wallets: walletRule(v.wallets), allocations: allocationRule(v.allocations) }])),
       } : null;
       const spec = { launchpadId: lp.id, signature: ev.signature, topic0, token: ev.token, fields: ev.fields ?? {}, emitters, platform };
       if (!byTopic0.has(topic0)) byTopic0.set(topic0, []);
@@ -94,6 +96,83 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
   // creation events that carry a platform resolver, with the factory to call (for live lookups of unindexed tokens)
   const platformSpecs = [...byTopic0.values()].flat().filter((s) => s.platform).flatMap((s) => [...s.emitters.keys()].map((factory) => ({ ...s, factory })));
   return { chainId, launchpads, byTopic0, topic0s: [...byTopic0.keys()], factoryOf, companionOf, quoteIssuers, platformSpecs };
+}
+
+function walletRule(w) {
+  if (!w) return null;
+  return {
+    status: w.status ?? 'observed', source: w.source ?? null,
+    senders: new Set((w.senders ?? []).map(lc)),
+    eip7702Delegates: new Set((w.eip7702Delegates ?? []).map(lc)),
+  };
+}
+
+function allocationRule(a) {
+  if (!a) return null;
+  return {
+    status: a.status ?? 'documented', source: a.source ?? null,
+    allowed: (a.allowed ?? []).map((x) => ({ pct: Number(x.pct), cliffDays: Number(x.cliffDays ?? 0), vestDays: Number(x.vestDays ?? 0) })),
+    noneAllowed: a.noneAllowed !== false,
+    tolerancePct: Number(a.tolerancePct ?? 0.5),
+  };
+}
+
+/**
+ * Is what was minted at birth something the app's own launch flow produces? Bankr's form offers
+ * exactly two things: 15% to one wallet with a 30-day cliff over a year, or nothing. A 14% instant
+ * allocation is not a Bankr launch, whoever sent it. Returns 'verified', 'failed', or 'unverified'
+ * (the birth receipt has not been read, so the allocations are unknown).
+ */
+export function checkAllocations(rule, premint, totalSupply) {
+  if (!rule) return null;
+  if (premint === undefined) return 'unverified';
+  const allocs = premint?.allocations ?? [];
+  if (!allocs.length) return rule.noneAllowed ? 'verified' : 'failed';
+  const supply = totalSupply ? BigInt(totalSupply) : 0n;
+  if (supply <= 0n) return 'unverified';
+  for (const a of allocs) {
+    const sch = premint.schedules?.[a.scheduleId];
+    const pct = Number((BigInt(a.amount) * 10000n) / supply) / 100;
+    const cliffDays = sch ? sch.cliff / 86400 : 0;
+    const vestDays = sch ? sch.duration / 86400 : 0;
+    const ok = rule.allowed.some((x) => Math.abs(x.pct - pct) <= rule.tolerancePct && Math.abs(x.cliffDays - cliffDays) <= 1 && Math.abs(x.vestDays - vestDays) <= 1);
+    if (!ok) return 'failed';
+  }
+  return 'verified';
+}
+
+/**
+ * The verdict on an integrator claim, from both rules. A known wallet settles it. An allocation the
+ * app's flow cannot produce settles it the other way, whoever sent it. A sender that is not a known
+ * wallet but whose allocation is within the app's policy stays unverified: the app also launches
+ * from partner and CLI keys, and a faithful copy of its template is harmless anyway.
+ */
+export function judgeClaim(k, sender, senderCode, premint, totalSupply) {
+  const wallet = checkSender(k.wallets, sender, senderCode);
+  const allocations = checkAllocations(k.allocations, premint, totalSupply);
+  if (wallet === null && allocations === null) return null;
+  let result;
+  if (wallet === 'verified') result = 'verified';
+  else if (allocations === 'failed') result = 'failed';
+  else if (wallet === 'failed') result = allocations === null ? 'failed' : 'unverified';
+  else result = 'unverified';
+  return { result, wallet, allocations };
+}
+
+/**
+ * Does the launch sender belong to the app? `code` is eth_getCode(sender): an EIP-7702 delegated
+ * EOA has code 0xef0100 + the delegate address. Returns 'verified', 'failed', or 'unverified'
+ * (sender or its code unknown).
+ */
+export function checkSender(rule, sender, code) {
+  if (!rule) return null;
+  if (!sender) return 'unverified';
+  const s = lc(sender);
+  if (rule.senders.has(s)) return 'verified';
+  if (typeof code !== 'string') return 'unverified';
+  const c = lc(code);
+  if (c.startsWith('0xef0100') && c.length === 48 && rule.eip7702Delegates.has('0x' + c.slice(8))) return 'verified';
+  return 'failed';
 }
 
 function readSlot(log, where) {
@@ -169,7 +248,7 @@ export function refsForToken(logs, token) {
  *   known integrator  -> that launchpad, 'verified' if confirmed, 'observed-emitter' if observed
  *   unknown           -> the protocol itself, 'verified' (it IS a protocol launch, app unlisted)
  */
-export function resolvePlatform(match, rawResult) {
+export function resolvePlatform(match, rawResult, sender = null, senderCode = null, premint = undefined, totalSupply = null) {
   const p = match.platform;
   let addr = null;
   try {
@@ -178,8 +257,58 @@ export function resolvePlatform(match, rawResult) {
     if (typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v)) addr = v.toLowerCase();
   } catch { /* unreadable: stays at protocol level */ }
   const k = addr ? p.known.get(addr) : null;
-  if (k) return { platform: addr, launchpadId: k.launchpad, confidence: k.status === 'confirmed' ? 'verified' : 'observed-emitter', label: k.label ?? null };
-  return { platform: addr ?? 'unreadable', launchpadId: match.launchpadId, confidence: 'verified', label: null };
+  if (k) {
+    const claim = judgeClaim(k, sender, senderCode, premint, totalSupply);
+    const claimCheck = claim ? JSON.stringify(claim) : null;
+    // The integrator field claims an app, but the launch is not the app's: a direct protocol
+    // launch wearing the label. Credited to the protocol, flagged.
+    if (claim?.result === 'failed') return { platform: addr, launchpadId: match.launchpadId, confidence: 'look-alike-platform', label: null, claimedLaunchpadId: k.launchpad, claimCheck };
+    return { platform: addr, launchpadId: k.launchpad, confidence: k.status === 'confirmed' ? 'verified' : 'observed-emitter', label: k.label ?? null, claimedLaunchpadId: k.launchpad, claimCheck };
+  }
+  return { platform: addr ?? 'unreadable', launchpadId: match.launchpadId, confidence: 'verified', label: null, claimedLaunchpadId: null, claimCheck: null };
+}
+
+/** The stored claim verdict: { result, wallet, allocations } or null. */
+export function parseClaim(claimCheck) {
+  if (!claimCheck) return null;
+  try { const c = JSON.parse(claimCheck); return c && typeof c === 'object' ? c : null; } catch { return null; }
+}
+
+/** True when some known integrator of this platform has a wallet rule, so the sender's code is worth fetching. */
+export const platformNeedsSender = (match) => [...(match.platform?.known?.values() ?? [])].some((k) => k.wallets);
+export const senderCodeCall = (sender) => ({ method: 'eth_getCode', params: [sender, 'latest'] });
+
+// ---- pre-mint: tokens minted at birth to someone other than the sale -----------------------------
+// Doppler's token (DopplerERC20V1) records its allocations as events in the birth receipt:
+//   VestingScheduleCreated(scheduleId, cliff, duration)   duration 0 = unlocked at once
+//   VestingAllocated(beneficiary, scheduleId, amount)
+const VESTING_SCHEDULE_TOPIC = toEventSelector('VestingScheduleCreated(uint256,uint64,uint64)');
+const VESTING_ALLOCATED_TOPIC = toEventSelector('VestingAllocated(address,uint256,uint256)');
+
+/**
+ * What was minted at birth outside the sale, from the token's own logs in its birth receipt.
+ * Amounts are decimal strings in base units. Returns null when the receipt shows no allocation.
+ *   { escrowed, schedules: { id: { cliff, duration } }, allocations: [{ to, amount, scheduleId }] }
+ */
+export function premintFacts(receipt, token) {
+  const t = lc(token);
+  const schedules = {};
+  const allocations = [];
+  let escrowed = 0n;
+  for (const l of receipt?.logs ?? []) {
+    if (lc(l.address) !== t || !l.topics?.length) continue;
+    const t0 = lc(l.topics[0]);
+    const d = (l.data ?? '0x').slice(2);
+    if (t0 === VESTING_SCHEDULE_TOPIC && l.topics.length >= 2 && d.length >= 128) {
+      schedules[String(BigInt(l.topics[1]))] = { cliff: Number(BigInt('0x' + d.slice(0, 64))), duration: Number(BigInt('0x' + d.slice(64, 128))) };
+    } else if (t0 === VESTING_ALLOCATED_TOPIC && l.topics.length >= 3 && d.length >= 64) {
+      allocations.push({ to: '0x' + lc(l.topics[1]).slice(26), scheduleId: String(BigInt(l.topics[2])), amount: BigInt('0x' + d.slice(0, 64)).toString() });
+    } else if (t0 === TRANSFER_TOPIC && l.topics.length === 3 && lc(l.topics[1]) === ZERO_TOPIC && '0x' + lc(l.topics[2]).slice(26) === t) {
+      escrowed += BigInt('0x' + (d.slice(0, 64) || '0')); // minted to the token itself: the vesting escrow
+    }
+  }
+  if (!allocations.length && escrowed === 0n) return null;
+  return { escrowed: escrowed.toString(), schedules, allocations };
 }
 
 export function platformCall(match, token) {

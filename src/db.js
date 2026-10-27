@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   code_size INTEGER, fp_kind TEXT, fp_key TEXT, fp_exact TEXT, impl TEXT, upgradeable INTEGER,
   name TEXT, symbol TEXT, decimals INTEGER, total_supply TEXT, is_lp INTEGER NOT NULL DEFAULT 0,
   tx_to TEXT, mint_to TEXT, v4_hook TEXT, platform TEXT,
+  tx_from TEXT, claim_app TEXT, claim_check TEXT, premint TEXT,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (chain_id, address)
 ) WITHOUT ROWID;
@@ -136,7 +137,7 @@ function setUp(db, file) {
   db.exec(SCHEMA);
   // databases created before these columns existed
   const have = new Set(db.prepare('PRAGMA table_info(tokens)').all().map((c) => c.name));
-  for (const col of ['tx_to', 'mint_to', 'v4_hook', 'platform']) if (!have.has(col)) db.exec(`ALTER TABLE tokens ADD COLUMN ${col} TEXT`);
+  for (const col of ['tx_to', 'mint_to', 'v4_hook', 'platform', 'tx_from', 'claim_app', 'claim_check', 'premint']) if (!have.has(col)) db.exec(`ALTER TABLE tokens ADD COLUMN ${col} TEXT`);
 
   // birth_refs used to be a text table. Move it into the id form when there is room; until then the
   // old table keeps serving reads (same columns as the view) and writes go to it.
@@ -212,10 +213,10 @@ function setUp(db, file) {
     putToken: db.prepare(`INSERT OR REPLACE INTO tokens (
         chain_id, address, birth_block, birth_tx, birth_source, launchpad_id, confidence, factory, factory_label,
         event_sig, event_fields, family, code_size, fp_kind, fp_key, fp_exact, impl, upgradeable,
-        name, symbol, decimals, total_supply, is_lp, tx_to, mint_to, v4_hook, platform, created_at)
+        name, symbol, decimals, total_supply, is_lp, tx_to, mint_to, v4_hook, platform, tx_from, claim_app, claim_check, premint, created_at)
       VALUES (@chain_id, @address, @birth_block, @birth_tx, @birth_source, @launchpad_id, @confidence, @factory, @factory_label,
         @event_sig, @event_fields, @family, @code_size, @fp_kind, @fp_key, @fp_exact, @impl, @upgradeable,
-        @name, @symbol, @decimals, @total_supply, @is_lp, @tx_to, @mint_to, @v4_hook, @platform, @created_at)`),
+        @name, @symbol, @decimals, @total_supply, @is_lp, @tx_to, @mint_to, @v4_hook, @platform, @tx_from, @claim_app, @claim_check, @premint, @created_at)`),
     // gaps left by a long stall: newest first, so the most recent launches come back first
     addGap: db.prepare('INSERT OR REPLACE INTO gaps (chain_id, from_block, to_block, created_at) VALUES (?, ?, ?, ?)'),
     newestGap: db.prepare('SELECT from_block, to_block FROM gaps WHERE chain_id = ? ORDER BY to_block DESC LIMIT 1'),
@@ -250,8 +251,15 @@ function setUp(db, file) {
       GROUP BY r.emitter, r.topic0 ORDER BY births DESC LIMIT ?`),
     getEmitter: db.prepare('SELECT * FROM emitters WHERE chain_id = ? AND address = ?'),
     // tokens attributed through a protocol event whose launching app has not been read yet
-    platformPending: db.prepare(`SELECT address, factory, event_sig FROM tokens WHERE chain_id = ? AND platform IS NULL AND factory = ? AND event_sig = ? ORDER BY birth_block DESC LIMIT ?`),
-    setPlatform: db.prepare('UPDATE tokens SET platform = ?, launchpad_id = ?, confidence = ?, factory_label = COALESCE(?, factory_label) WHERE chain_id = ? AND address = ?'),
+    platformPending: db.prepare(`SELECT address, factory, event_sig, tx_from, premint, total_supply FROM tokens WHERE chain_id = ? AND platform IS NULL AND factory = ? AND event_sig = ? ORDER BY birth_block DESC LIMIT ?`),
+    setPlatform: db.prepare(`UPDATE tokens SET platform = ?, launchpad_id = ?, confidence = ?, factory_label = COALESCE(?, factory_label),
+      claim_app = ?, claim_check = ? WHERE chain_id = ? AND address = ?`),
+    // facts read later from the birth receipt (tokens indexed before these columns existed)
+    setBirthFacts: db.prepare('UPDATE tokens SET tx_from = COALESCE(?, tx_from), premint = COALESCE(?, premint) WHERE chain_id = ? AND address = ?'),
+    setClaim: db.prepare('UPDATE tokens SET launchpad_id = ?, confidence = ?, claim_app = ?, claim_check = ? WHERE chain_id = ? AND address = ?'),
+    // Doppler-attributed rows whose birth receipt has not been read for these facts yet
+    premintPending: db.prepare(`SELECT address, birth_tx, birth_block, factory, event_sig, platform, total_supply FROM tokens WHERE chain_id = ? AND premint IS NULL AND tx_from IS NULL
+      AND birth_tx IS NOT NULL AND platform IS NOT NULL AND factory = ? ORDER BY birth_block DESC LIMIT ?`),
     getIssuerCursor: db.prepare('SELECT next_block FROM issuer_cursor WHERE chain_id = ? AND issuer = ?'),
     setIssuerCursor: db.prepare('INSERT OR REPLACE INTO issuer_cursor (chain_id, issuer, next_block) VALUES (?, ?, ?)'),
     putStock: db.prepare(`INSERT OR IGNORE INTO stock_tokens (chain_id, address, issuer, symbol, name, block, tx, beacon_ok, seen_at)
@@ -293,12 +301,13 @@ function setUp(db, file) {
     counts: db.prepare(`SELECT COUNT(*) AS tokens, SUM(launchpad_id IS NOT NULL) AS attributed FROM tokens WHERE chain_id = ? AND is_lp = 0`),
   };
   // Stronger evidence replaces weaker evidence; equal or weaker evidence only fills gaps.
-  const RANK = { verified: 5, 'observed-emitter': 4, 'code-match': 3, 'unverified-emitter': 2, discovered: 1, none: 0 };
-  const ATTRIBUTION = ['launchpad_id', 'confidence', 'factory', 'factory_label', 'event_sig', 'event_fields', 'family', 'platform', 'birth_block', 'birth_tx', 'birth_source'];
+  // look-alike-platform ranks with unverified-emitter: a protocol launch that claims an app it was not sent by
+  const RANK = { verified: 5, 'observed-emitter': 4, 'code-match': 3, 'unverified-emitter': 2, 'look-alike-platform': 2, discovered: 1, none: 0 };
+  const ATTRIBUTION = ['launchpad_id', 'confidence', 'factory', 'factory_label', 'event_sig', 'event_fields', 'family', 'platform', 'claim_app', 'claim_check', 'birth_block', 'birth_tx', 'birth_source'];
   const BLANK = { birth_block: null, birth_tx: null, birth_source: null, launchpad_id: null, confidence: 'none', factory: null,
     factory_label: null, event_sig: null, event_fields: null, family: null, code_size: null, fp_kind: null, fp_key: null,
     fp_exact: null, impl: null, upgradeable: null, name: null, symbol: null, decimals: null, total_supply: null, is_lp: 0,
-    tx_to: null, mint_to: null, v4_hook: null, platform: null };
+    tx_to: null, mint_to: null, v4_hook: null, platform: null, tx_from: null, claim_app: null, claim_check: null, premint: null };
 
   function saveToken(row) {
     const old = q.getToken.get(row.chain_id, row.address);

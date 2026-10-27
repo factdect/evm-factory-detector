@@ -1,5 +1,5 @@
 // Turns index rows into the public JSON. The lookup page renders exactly this JSON.
-import { INFRA_ADDRESSES, INFRA_TOPICS, platformCall, resolvePlatform } from './attribution.js';
+import { INFRA_ADDRESSES, INFRA_TOPICS, judgeClaim, parseClaim, platformCall, premintFacts, resolvePlatform, senderCodeCall } from './attribution.js';
 import { BirthRecorder } from './births.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { findCreation } from './explorer.js';
@@ -14,6 +14,7 @@ const VERDICTS = {
   'protocol-verified': ['Verified protocol, unlisted app', 'Created through the canonical contract of a permissionless launch protocol, by an app (integrator) that is not in the registry. The protocol part is certain; which app launched it is not a known one.'],
   'observed-platform': ['Observed launchpad', 'Created through a launch protocol by an integrator we identified on-chain as this launchpad. The launchpad has not published this address.'],
   'unverified-emitter': ['Look-alike event', 'The event signature matches a known launchpad, but the emitter is not one of its published factories. Several launchpads share signatures and anyone can emit one.'],
+  'look-alike-platform': ['Claims a launchpad it was not sent by', 'Created through a permissionless launch protocol with the integrator field set to a known launchpad, but the launch transaction was not sent by that launchpad\'s wallets. The integrator field is self-declared calldata: anyone can write another app\'s address there, and terminals that read only that field show the token as that app\'s. This is a direct protocol launch wearing the label.'],
   discovered: ['Unlisted factory', 'No launchpad in the registry claims this token. A contract that has announced several tokens of one template did, which is what a factory looks like.'],
   'discovered-first': ['First sighting', 'The contract that announced this token has announced no other token in this index. A one-off deployer and a brand-new factory look identical until the second token.'],
   'silent-factory': ['Unlisted silent factory', 'A contract the deployer called created and received this token, and has created other tokens the same way, without ever emitting a creation event. A factory that stays quiet is not in any launchpad registry.'],
@@ -272,10 +273,64 @@ export class Lookup {
         // numeraire (word 0) all-zero means the protocol has no record of this asset
         if (/^0x0{64}/.test(data.slice(0, 66).replace('0x', '0x'))) continue;
         return { launchpad_id: r.launchpadId, confidence: r.confidence, factory: spec.factory, factory_label: spec.emitters.get(spec.factory)?.label ?? null,
-          event_sig: spec.signature, platform: r.platform, attribution_source: 'live-protocol-call' };
+          event_sig: spec.signature, platform: r.platform, claim_app: r.claimedLaunchpadId ?? null, claim_check: r.claimCheck ?? null, attribution_source: 'live-protocol-call' };
       } catch { /* try the next protocol */ }
     }
     return {};
+  }
+
+  /** The stored pre-mint facts as shares of the total supply. */
+  #premint(row) {
+    if (!row.premint) return null;
+    let p;
+    try { p = typeof row.premint === 'string' ? JSON.parse(row.premint) : row.premint; } catch { return null; }
+    const supply = row.total_supply ? BigInt(row.total_supply) : 0n;
+    const pct = (amt) => (supply > 0n ? Number((BigInt(amt) * 10000n) / supply) / 100 : null);
+    const allocations = (p.allocations ?? []).map((a) => {
+      const sch = p.schedules?.[a.scheduleId] ?? null;
+      const unlocked = sch ? sch.duration === 0 : false;
+      return { to: a.to, amount: a.amount, pct: pct(a.amount), cliffDays: sch ? Math.round((sch.cliff / 86400) * 10) / 10 : null, vestDays: sch ? Math.round((sch.duration / 86400) * 10) / 10 : null, unlockedAtLaunch: unlocked };
+    });
+    const total = allocations.reduce((s, a) => s + BigInt(a.amount), 0n);
+    if (total === 0n && !(p.escrowed && BigInt(p.escrowed) > 0n)) return null; // receipt read, nothing minted outside the sale
+    const unlocked = allocations.filter((a) => a.unlockedAtLaunch).reduce((s, a) => s + BigInt(a.amount), 0n);
+    const round = (x) => (x === null ? null : Math.round(x * 100) / 100);
+    return { totalPct: round(pct(total.toString())), unlockedPct: round(pct(unlocked.toString())), escrowedPct: round(pct(p.escrowed ?? '0')), allocations };
+  }
+
+  /**
+   * Tokens indexed before the sender and pre-mint columns existed: read their birth receipt once,
+   * on first lookup (one RPC call), and check the launch sender against the claimed app's wallets.
+   * Returns the updated row, or the same row when nothing could be added.
+   */
+  async #completeBirthFacts(chain, row) {
+    if (!row.birth_tx || row.premint !== null || row.tx_from !== null) return row;
+    const rpc = this.rpcs.get(chain.id);
+    const reg = this.registries.get(chain.id);
+    if (!rpc) return row;
+    try {
+      const [rc] = await rpc.batch([{ method: 'eth_getTransactionReceipt', params: [row.birth_tx] }], { priority: true });
+      const receipt = rc?.result;
+      if (!receipt) return row;
+      const sender = receipt.from ? receipt.from.toLowerCase() : null;
+      const premint = premintFacts(receipt, row.address);
+      this.store.q.setBirthFacts.run(sender, premint ? JSON.stringify(premint) : '{}', chain.id, row.address);
+      let next = { ...row, tx_from: sender, premint: premint ? JSON.stringify(premint) : '{}' };
+      // a protocol launch that claims an app with rules: judge the claim now (sender wallet + allocation policy)
+      const spec = row.platform && row.factory ? (reg.platformSpecs ?? []).find((s) => s.factory === row.factory) : null;
+      const known = spec?.platform.known.get(row.platform);
+      if (spec && known && (known.wallets || known.allocations) && parseClaim(row.claim_check)?.result !== 'verified') {
+        const code = sender && known.wallets ? (await rpc.batch([senderCodeCall(sender)], { priority: true }))[0]?.result ?? null : null;
+        const claim = judgeClaim(known, sender, code, premint, row.total_supply ?? null);
+        const look = claim?.result === 'failed';
+        const launchpadId = look ? spec.launchpadId : known.launchpad;
+        const confidence = look ? 'look-alike-platform' : known.status === 'confirmed' ? 'verified' : 'observed-emitter';
+        const claimCheck = claim ? JSON.stringify(claim) : null;
+        this.store.q.setClaim.run(launchpadId, confidence, known.launchpad, claimCheck, chain.id, row.address);
+        next = { ...next, launchpad_id: launchpadId, confidence, claim_app: known.launchpad, claim_check: claimCheck };
+      }
+      return next;
+    } catch { return row; }
   }
 
   #templateOwner(reg, fpKey) {
@@ -300,6 +355,9 @@ export class Lookup {
     const protocolLaunch = Boolean(row.platform);
     if (protocolLaunch && code === 'verified' && lp && reg.byTopic0 && [...reg.byTopic0.values()].flat().some((s) => s.launchpadId === lp.id && s.platform)) code = 'protocol-verified';
     else if (protocolLaunch && code === 'observed-emitter') code = 'observed-platform';
+    const claimed = row.claim_app ? reg.launchpads.get(row.claim_app) ?? { id: row.claim_app, name: row.claim_app } : null;
+    const claim = parseClaim(row.claim_check);
+    const premint = this.#premint(row);
     let likely = null;
     // no announcers because they were pruned is not the same as "nobody announced it"
     const pruned = code === 'discovered' && !primary && row.birth_block != null && row.birth_block < (this.store.q.getMeta.get(chain.id, 'pruned_before')?.v ?? -1);
@@ -321,7 +379,25 @@ export class Lookup {
       const top = cluster.launchpads[0];
       if (top?.id && top.share >= 0.9 && top.tokens >= 5 && !cluster.template?.sharedByApps) { code = 'bytecode-cluster'; likely = { id: top.id, name: top.name, share: top.share, tokens: top.tokens }; }
     }
-    const [headline, detail] = VERDICTS[code] ?? VERDICTS.none;
+    let [headline, detail] = VERDICTS[code] ?? VERDICTS.none;
+    if (code === 'look-alike-platform' && claimed) headline = `Claims ${claimed.name}, not launched by it`;
+    const warnings = [];
+    if (premint?.unlockedPct >= 1) {
+      const to = premint.allocations.filter((a) => a.unlockedAtLaunch).map((a) => a.to);
+      warnings.push(`${premint.unlockedPct}% of the supply was minted outside the sale and could be sold from the first block (to ${to.length === 1 ? to[0] : `${to.length} wallets`}).`);
+    } else if (premint?.totalPct >= 1) {
+      warnings.push(`${premint.totalPct}% of the supply was minted outside the sale (vesting; see premint).`);
+    }
+    if (code === 'look-alike-platform' && claimed) {
+      const why = [];
+      if (claim?.allocations === 'failed') why.push(`what was minted at birth${premint?.unlockedPct ? ` (${premint.unlockedPct}% unlocked at launch)` : ''} is not something ${claimed.name}'s launch flow produces`);
+      if (claim?.wallet === 'failed') why.push(`the launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s wallets`);
+      warnings.push(`The integrator field names ${claimed.name}, but ${why.join(', and ')}. Terminals that trust the integrator field show it as a ${claimed.name} launch.`);
+    } else if (claim?.result === 'unverified' && claimed) {
+      warnings.push(claim.wallet === 'failed'
+        ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets; what was minted at birth matches ${claimed.name}'s policy, so the label is kept but not confirmed.`
+        : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);
+    }
     const factoryAddr = row.factory ?? silentMaker?.address ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
     const fstats = factoryAddr ? this.#emitterInfo(chain.id, factoryAddr) : null;
     const head = this.#head(chain.id);
@@ -335,7 +411,7 @@ export class Lookup {
       token: { address: row.address, name: row.name, symbol: row.symbol, decimals: row.decimals, totalSupply: row.total_supply,
         // other token contracts carrying this exact name and symbol (a counterfeit signal, not proof)
         sameNameElsewhere: row.name && row.symbol ? this.store.q.sameName.get(chain.id, row.name, row.symbol, row.address).n : 0 },
-      verdict: { code, headline, detail },
+      verdict: { code, headline, detail, warnings },
       launchpad: lp ? { id: lp.id, name: lp.name, url: lp.url ?? null, stack: lp.stack ?? null } : null,
       likelyLaunchpad: likely,
       factory: factoryAddr ? {
@@ -344,8 +420,11 @@ export class Lookup {
         sharesSignatureWith: row.family ? JSON.parse(row.family).filter((id) => id !== row.launchpad_id).map((id) => reg.launchpads.get(id)?.name ?? id) : [],
         platform: row.platform ? {
           integrator: row.platform === 'unreadable' ? null : row.platform,
-          launchpad: code === 'protocol-verified' ? null : lp?.name ?? null,
-          status: code === 'protocol-verified' ? 'unlisted' : code === 'observed-platform' ? 'observed' : 'confirmed',
+          launchpad: code === 'protocol-verified' || code === 'look-alike-platform' ? null : lp?.name ?? null,
+          status: code === 'protocol-verified' ? 'unlisted' : code === 'look-alike-platform' ? 'look-alike' : code === 'observed-platform' ? 'observed' : 'confirmed',
+          // the app the integrator field names, and whether the launch sender belongs to it
+          claims: claimed ? { id: claimed.id, name: claimed.name } : null,
+          claimCheck: claim?.result ?? null, senderCheck: claim?.wallet ?? null, allocationCheck: claim?.allocations ?? null, sender: row.tx_from ?? null,
         } : null,
         // silent factories announce nothing: report what they made instead
         silent: Boolean(silentMaker),
@@ -357,7 +436,7 @@ export class Lookup {
       birth: row.birth_tx ? {
         block: row.birth_block, tx: row.birth_tx, source: row.birth_source,
         explorerUrl: chain.explorer?.web ? `${chain.explorer.web}/tx/${row.birth_tx}` : null,
-        calledContract: row.tx_to ?? null, firstMintTo: row.mint_to ?? null, v4Hook: row.v4_hook ?? null,
+        calledContract: row.tx_to ?? null, sender: row.tx_from ?? null, firstMintTo: row.mint_to ?? null, v4Hook: row.v4_hook ?? null,
       } : null,
       bytecode: {
         size: row.code_size, kind: row.fp_kind, implementation: row.impl,
@@ -369,6 +448,8 @@ export class Lookup {
           : row.fp_kind === 'eip1967-proxy' ? 'EIP-1967 proxy: whoever controls the admin or implementation can change the logic.' : null,
       },
       announcers,
+      // tokens minted at birth outside the sale (Doppler vesting allocations), as shares of the supply
+      premint,
       evidencePruned: pruned,
       indexedAt: row.created_at ?? null,
     };
@@ -385,13 +466,14 @@ export class Lookup {
     const chain = this.chain(chainId);
     if (!chain) return { status: 404, body: { error: 'unknown_chain', message: `Chain ${chainId} is not configured here.`, chains: [...this.chains.keys()] } };
     const addr = address.toLowerCase();
-    const row = this.store.q.getToken.get(chain.id, addr);
+    let row = this.store.q.getToken.get(chain.id, addr);
     if (row) {
       // indexed but never attributed (born before the index, or a silent birth): a protocol may still know it
       if (!row.launchpad_id && (row.confidence === 'none' || row.confidence === 'discovered')) {
         const live = await this.#liveProtocol(chain, addr);
         if (live.launchpad_id) return { status: 200, body: this.#shape(chain, { ...row, ...live }) };
       }
+      row = await this.#completeBirthFacts(chain, row);
       return { status: 200, body: this.#shape(chain, row) };
     }
 
@@ -434,6 +516,9 @@ export class Lookup {
       // unlisted = we have no launchpad for it: a discovered/unverified factory, or none at all
       unlisted: !r.launchpad_id,
       confidence: r.confidence, factory: r.factory, codeSize: r.code_size, bytecodeKind: r.fp_kind, cluster: r.fp_key,
+      // the app the integrator field claims when the launch was not sent by it; supply unlocked at birth
+      claims: r.confidence === 'look-alike-platform' && r.claim_app ? reg.launchpads.get(r.claim_app)?.name ?? r.claim_app : null,
+      unlockedPct: this.#premint(r)?.unlockedPct ?? null,
     }));
   }
 

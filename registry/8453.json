@@ -1,7 +1,7 @@
 {
   "chainId": 8453,
-  "updated": "2026-09-26",
-  "notes": "Empty on purpose: with no registry the indexer runs in discovery-only mode. Add launchpads in the same shape as registry/4663.json.",
+  "updated": "2026-10-27",
+  "notes": "Hydrex (confirmed), Catalyst Markets (observed) and the Doppler protocol with Bankr as a known integrator. Add launchpads in the same shape as registry/4663.json.",
   "launchpads": [
     {
       "id": "hydrex",
@@ -112,6 +112,97 @@
         {
           "address": "0xfd2823fbf019e9d4a121544590e00705fdae80f0",
           "label": "seeder (emits MarketSeeded)"
+        }
+      ]
+    },
+    {
+      "id": "doppler",
+      "name": "Doppler protocol",
+      "url": "https://docs.doppler.lol",
+      "stack": "Permissionless launch protocol (Whetstone Research). Any app can launch through the Airlock; the integrator stored per asset names the app.",
+      "events": [
+        {
+          "signature": "Create(address,address,address,address)",
+          "token": {
+            "from": "data",
+            "word": 0
+          },
+          "fields": {
+            "numeraire": {
+              "from": "topic",
+              "index": 1
+            },
+            "initializer": {
+              "from": "data",
+              "word": 1
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x660eaaedebc968f8f3694354fa8ec0b4c5ba8d12",
+              "label": "Airlock",
+              "status": "confirmed",
+              "source": "@whetstone-research/doppler-sdk getAddresses(8453).airlock"
+            }
+          ],
+          "platform": {
+            "call": "function getAssetData(address) view returns (address,address,address,address,address,address,address,uint256,uint256,address)",
+            "field": 9,
+            "name": "integrator",
+            "known": {
+              "0xf60633d02690e2a15a54ab919925f3d038df163e": {
+                "launchpad": "bankr",
+                "status": "observed",
+                "source": "Same integrator address as on Robinhood Chain (docs.bankr.bot: Doppler launches on Base, Robinhood Chain and Arbitrum). On-chain 2026-10-27: 65 Bankr-integrator launches in 11 h on Base.",
+                "wallets": {
+                  "status": "observed",
+                  "source": "On-chain 2026-10-27: the 12 newest Bankr-integrator launches on Base were sent by these four hot wallets (nonces 300k-540k), each with the documented 15% vesting (30-day cliff, 1 year) to a separate fee recipient. Add a wallet when a launch listed on bankr.bot comes from a new one.",
+                  "senders": [
+                    "0x710680d1711f284e9acd905b69b0ac5d6e399ed6",
+                    "0x2d3faeac23567d32b249b2325689f6f76dda4a28",
+                    "0xaf061c2dad091055e541c2ec20fa3937e1ea8198",
+                    "0x6cfcc8f86e1182772bfe8994f4aa38ef3012e224"
+                  ],
+                  "eip7702Delegates": []
+                },
+                "allocations": {
+                  "status": "documented",
+                  "source": "docs.bankr.bot (token-launching/overview, faq/token-launching) and the launch form, checked 2026-10-27: 'Creator vesting: 15% ... vests over 1 year with a 30-day cliff' or 'No vesting' (100% into the pool); 'A Doppler launch has no custom percentage or schedule.' Partner/org launches sell 100% with no vest.",
+                  "allowed": [
+                    {
+                      "pct": 15,
+                      "cliffDays": 30,
+                      "vestDays": 365
+                    }
+                  ],
+                  "noneAllowed": true,
+                  "tolerancePct": 0.5
+                }
+              }
+            }
+          }
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0xf0b5141dd9096254b2ca624dff26024f46087229",
+          "label": "TokenFactory"
+        },
+        {
+          "address": "0xfdfd7d27089f306eef279b5da6bfe878250cb6bb",
+          "label": "V4Initializer"
+        },
+        {
+          "address": "0x65de470da664a5be139a5d812be5fda0d76cc951",
+          "label": "V4MulticurveInitializer"
+        },
+        {
+          "address": "0x43d0d97ec9241a8f05a264f94b82a1d2e600f2b3",
+          "label": "DopplerLens"
+        },
+        {
+          "address": "0x6ff5693b99212da76ad316178a184ab56d299b43",
+          "label": "UniversalRouter"
         }
       ]
     }

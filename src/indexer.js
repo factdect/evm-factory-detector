@@ -13,7 +13,7 @@
 import { matchKnownEvent, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { probePendingAges } from './age.js';
 import { scanIssuers } from './stocks.js';
-import { BirthRecorder, probePendingPlatforms } from './births.js';
+import { BirthRecorder, probePendingBirthFacts, probePendingPlatforms } from './births.js';
 import { isDiskFull } from './db.js';
 import { getLogsRange, hex, isCallerRefusal, isStateUnavailable } from './rpc.js';
 
@@ -158,7 +158,7 @@ export class Indexer {
   async maintain(head) {
     const { chain, store } = this;
     const now = Date.now();
-    this.idleUntil ??= { platforms: 0, ages: 0, stocks: 0 };
+    this.idleUntil ??= { platforms: 0, ages: 0, stocks: 0, facts: 0 };
     this.status.jobMs ??= {};
     const rpc = this.bgRpc;
     const job = async (name, fn) => {
@@ -182,6 +182,12 @@ export class Indexer {
       const n = await probePendingPlatforms({ chain, rpc, registry: this.registry, store, max: 24 });
       if (!n) this.idleUntil.platforms = now + 60_000;
       this.status.platformsResolved = (this.status.platformsResolved ?? 0) + n;
+    });
+    await job('facts', async () => {
+      // sender + pre-mint for protocol launches indexed before those columns existed (stats window only)
+      const n = await probePendingBirthFacts({ chain, rpc, registry: this.registry, store, max: 8, sinceBlock: Math.max(0, head - chain.statsWindowBlocks) });
+      if (!n) this.idleUntil.facts = now + 60_000;
+      this.status.factsCompleted = (this.status.factsCompleted ?? 0) + n;
     });
     await job('ages', async () => {
       // the pending list is costly to compute: refresh it every 5 minutes, probe one per cycle

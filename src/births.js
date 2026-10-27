@@ -1,6 +1,6 @@
 // Records one token birth: enrich (code, metadata, receipt), attribute, persist.
 // Shared by the indexer and by on-demand lookups so both apply the same rules.
-import { matchKnownEvent, pad32, platformCall, refsForToken, resolvePlatform, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
+import { judgeClaim, matchKnownEvent, pad32, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { fingerprint } from './fingerprint.js';
 
@@ -28,7 +28,7 @@ export function birthFacts(receipt, token) {
       if (hook.length === 42 && hook !== ZERO_ADDR) v4Hook = hook;
     }
   }
-  return { txTo: receipt?.to ? receipt.to.toLowerCase() : null, mintTo, v4Hook };
+  return { txTo: receipt?.to ? receipt.to.toLowerCase() : null, txFrom: receipt?.from ? receipt.from.toLowerCase() : null, mintTo, v4Hook };
 }
 
 export class BirthRecorder {
@@ -68,14 +68,21 @@ export class BirthRecorder {
       }
       if (match.confidence === 'unverified-emitter' && (await this.sameCodeAsKnownFactory(match, opts))) match.confidence = 'code-match';
       if (match.platform) {
-        // a protocol launch: which app launched it decides the launchpad
-        const [res] = await rpc.batch([platformCall(match, token)], opts);
-        const r = resolvePlatform(match, res?.result ?? '0x');
-        Object.assign(match, { launchpadId: r.launchpadId, confidence: r.confidence, platformAddr: r.platform, factoryLabel: r.label ?? match.factoryLabel });
+        // A protocol launch: which app launched it decides the launchpad. The integrator field is
+        // self-declared, so the claim is judged by the launch sender (against the app's known
+        // wallets) and by what was minted at birth (against the app's allocation policy).
+        const sender = receipt?.from ? receipt.from.toLowerCase() : null;
+        const calls = [platformCall(match, token)];
+        if (sender && platformNeedsSender(match)) calls.push(senderCodeCall(sender));
+        const res = await rpc.batch(calls, opts);
+        const r = resolvePlatform(match, res[0]?.result ?? '0x', sender, res[1]?.result ?? null, receipt ? premintFacts(receipt, token) : undefined, meta.total_supply ?? null);
+        Object.assign(match, { launchpadId: r.launchpadId, confidence: r.confidence, platformAddr: r.platform, factoryLabel: r.label ?? match.factoryLabel,
+          claimedLaunchpadId: r.claimedLaunchpadId, claimCheck: r.claimCheck });
       }
     }
 
     const facts = birthFacts(receipt, token);
+    const premint = premintFacts(receipt, token);
     let saved;
     store.db.transaction(() => {
       saved = store.saveToken({
@@ -89,6 +96,8 @@ export class BirthRecorder {
         family: match ? JSON.stringify(match.family) : null,
         ...fpColumns(fp), ...meta,
         tx_to: facts.txTo, mint_to: facts.mintTo, v4_hook: facts.v4Hook, platform: match?.platformAddr ?? null,
+        tx_from: facts.txFrom, claim_app: match?.claimedLaunchpadId ?? null, claim_check: match?.claimCheck ?? null,
+        premint: premint ? JSON.stringify(premint) : null,
       });
       for (const r of refsForToken(logs, token)) store.q.addRef.run(chain.id, token, r.emitter, r.topic0, r.logIndex, block ?? 0);
       store.q.markSeen.run(chain.id, token, block ?? 0, 1);
@@ -171,18 +180,65 @@ export async function probePendingPlatforms({ chain, rpc, registry, store, max =
     for (const spec of specs) {
       if (!spec.platform) continue;
       for (const [emitter, entry] of spec.emitters) {
-        const rows = store.q.platformPending.all(chain.id, emitter, spec.signature, max - n);
+        const rows = store.q.platformPending.all(chain.id, emitter, spec.signature, max - n).map((r) => ({ ...r, premintObj: r.premint === null ? undefined : (() => { try { return JSON.parse(r.premint); } catch { return undefined; } })() }));
         if (!rows.length) continue;
         const match = { platform: spec.platform, factory: emitter, launchpadId: spec.launchpadId };
+        const needSender = platformNeedsSender(match);
         const res = await rpc.batch(rows.map((r) => platformCall(match, r.address)));
+        // the sender's code, for rows that recorded their sender (older rows did not: their claim stays unverified)
+        const withSender = needSender ? rows.map((r, i) => [i, r]).filter(([, r]) => r.tx_from) : [];
+        const codes = withSender.length ? await rpc.batch(withSender.map(([, r]) => senderCodeCall(r.tx_from))) : [];
+        const codeOf = new Map(withSender.map(([i], j) => [i, codes[j]?.result ?? null]));
         store.db.transaction(() => {
           rows.forEach((r, i) => {
             if (res[i]?.error) return; // retry next time
-            const p = resolvePlatform(match, res[i]?.result ?? '0x');
-            store.q.setPlatform.run(p.platform, p.launchpadId, p.confidence, p.label ?? entry.label ?? null, chain.id, r.address);
+            const p = resolvePlatform(match, res[i]?.result ?? '0x', r.tx_from ?? null, codeOf.get(i) ?? null, r.premintObj, r.total_supply ?? null);
+            store.q.setPlatform.run(p.platform, p.launchpadId, p.confidence, p.label ?? entry.label ?? null, p.claimedLaunchpadId ?? null, p.claimCheck ?? null, chain.id, r.address);
           });
         })();
         n += rows.length;
+        if (n >= max) return n;
+      }
+    }
+  }
+  return n;
+}
+
+/**
+ * Idle-time job: tokens attributed through a protocol event before the sender and pre-mint columns
+ * existed. Reads their birth receipts (newest first, a few per cycle), stores the sender and the
+ * pre-mint facts, and checks the sender against the claimed app's wallets. Returns rows completed.
+ */
+export async function probePendingBirthFacts({ chain, rpc, registry, store, max = 8, sinceBlock = 0 }) {
+  let n = 0;
+  for (const specs of registry.byTopic0.values()) {
+    for (const spec of specs) {
+      if (!spec.platform) continue;
+      for (const [emitter] of spec.emitters) {
+        const rows = store.q.premintPending.all(chain.id, emitter, max - n).filter((r) => r.birth_block == null || r.birth_block >= sinceBlock);
+        if (!rows.length) continue;
+        const rcs = await rpc.batch(rows.map((r) => ({ method: 'eth_getTransactionReceipt', params: [r.birth_tx] })));
+        const senders = rows.map((r, i) => (rcs[i]?.result?.from ? rcs[i].result.from.toLowerCase() : null));
+        const known = rows.map((r) => (r.platform ? spec.platform.known.get(r.platform) : null));
+        const need = rows.map((r, i) => [i, senders[i]]).filter(([i, s_]) => s_ && known[i]?.wallets);
+        const judged = (k, i, premint, supply) => judgeClaim(k, senders[i], codeOf.get(i) ?? null, premint, supply);
+        const codes = need.length ? await rpc.batch(need.map(([, s_]) => senderCodeCall(s_))) : [];
+        const codeOf = new Map(need.map(([i], j) => [i, codes[j]?.result ?? null]));
+        store.db.transaction(() => {
+          rows.forEach((r, i) => {
+            const receipt = rcs[i]?.result;
+            if (!receipt) return; // retry next time
+            const premint = premintFacts(receipt, r.address);
+            store.q.setBirthFacts.run(senders[i], premint ? JSON.stringify(premint) : '{}', chain.id, r.address);
+            const k = known[i];
+            if (k && (k.wallets || k.allocations)) {
+              const claim = judged(k, i, premint, r.total_supply ?? null);
+              const look = claim?.result === 'failed';
+              store.q.setClaim.run(look ? spec.launchpadId : k.launchpad, look ? 'look-alike-platform' : k.status === 'confirmed' ? 'verified' : 'observed-emitter', k.launchpad, claim ? JSON.stringify(claim) : null, chain.id, r.address);
+            }
+            n++;
+          });
+        })();
         if (n >= max) return n;
       }
     }

@@ -320,8 +320,8 @@ test('birthFacts + ranking: the launcher the deployer called is the maker, not t
     { address: TOKEN_Z, logIndex: '0x9', topics: [XFER, pad32(LAUNCHER), pad32(PM)], data: '0x' + word('0x1') },
     { address: LAUNCHER, logIndex: '0xd', topics: ['0xf2d58b0e90ea2c0d4a4dc09a05f7da1e1ee3d7b58c96b55e5360c28cbb5bfbd4', pad32(TOKEN_Z)], data: '0x' },
   ] };
-  assert.deepEqual(birthFacts(receipt, TOKEN_Z), { txTo: LAUNCHER, mintTo: LAUNCHER, v4Hook: HOOK });
-  assert.deepEqual(birthFacts({ to: null, logs: [] }, TOKEN_Z), { txTo: null, mintTo: null, v4Hook: null });
+  assert.deepEqual(birthFacts(receipt, TOKEN_Z), { txTo: LAUNCHER, txFrom: null, mintTo: LAUNCHER, v4Hook: HOOK });
+  assert.deepEqual(birthFacts({ to: null, logs: [] }, TOKEN_Z), { txTo: null, txFrom: null, mintTo: null, v4Hook: null });
 
   const store = openDb(':memory:');
   const chain = { id: 4663, name: 'T', blockTimeMs: 100, statsWindowBlocks: 1_000_000, explorer: {} };
@@ -384,9 +384,9 @@ test('resolvePlatform: the Doppler integrator decides the launchpad (BURNER vs a
   const w = (a) => a.replace('0x', '').padStart(64, '0');
   const assetData = (integ) => '0x' + [w('0x0f17206447090e464c277571124dd2688e48aea9'), w('0x0'), w('0x0'), w('0x0'), w('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544'), w('0x0'), w('0x0'), w('0x1'), w('0x1'), w(integ)].join('');
   assert.deepEqual(resolvePlatform(m, assetData('0x92d435c96e63c43e12d6d0ab28f6b0b04072f765')),
-    { platform: '0x92d435c96e63c43e12d6d0ab28f6b0b04072f765', launchpadId: 'long-xyz', confidence: 'observed-emitter', label: null });
+    { platform: '0x92d435c96e63c43e12d6d0ab28f6b0b04072f765', launchpadId: 'long-xyz', confidence: 'observed-emitter', label: null, claimedLaunchpadId: 'long-xyz', claimCheck: null });
   assert.deepEqual(resolvePlatform(m, assetData('0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4')),
-    { platform: '0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4', launchpadId: 'doppler', confidence: 'verified', label: null }, 'BURNER: Doppler, not Long');
+    { platform: '0xbb0f84b75e43a48e55dd34c08daec6bdd668b1e4', launchpadId: 'doppler', confidence: 'verified', label: null, claimedLaunchpadId: null, claimCheck: null }, 'BURNER: Doppler, not Long');
   assert.equal(resolvePlatform(m, '0x').platform, 'unreadable');
 
   // old rows credited to Long from the Airlock event alone get moved by the idle probe

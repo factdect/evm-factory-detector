@@ -69,6 +69,10 @@ button.quiet { font: 500 14px var(--body); color: var(--enamel); background: non
 @media (prefers-reduced-motion: reduce) { .stamp.press { animation: none; } }
 .tone-ok { --tone: var(--enamel); } .tone-warn { --tone: var(--hazard); } .tone-bad { --tone: var(--lockout); } .tone-flat { --tone: var(--ink-2); }
 .detail { max-width: 70ch; margin: 18px 0 0; }
+/* what a buyer must know before anything else: supply that can be dumped, a label that is not earned */
+.warnings { max-width: 70ch; margin: 12px 0 0; padding: 0 0 0 1.2em; color: var(--lockout); font-weight: 600; }
+.warnings li { margin: 4px 0; }
+.badge { display: inline-block; margin-left: 6px; font: 600 11px/1 var(--display); letter-spacing: .04em; padding: 2px 5px; border-radius: 3px; background: var(--lockout); color: #fff; vertical-align: middle; white-space: nowrap; }
 
 .scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 15px; }
