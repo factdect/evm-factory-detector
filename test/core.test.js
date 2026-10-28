@@ -252,12 +252,14 @@ test('reattributeFromEvidence: promoting a factory into the registry labels its 
   const PONS2 = '0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e';
   const topic = [...reg.byTopic0.entries()].find(([, specs]) => specs.some((s) => s.launchpadId === 'pons-v2'))[0];
   for (const [addr, emitter, t] of [['0xaa', PONS2, topic], ['0xbb', '0x' + 'be'.repeat(20), topic], ['0xcc', PONS2, '0x' + '12'.repeat(32)]]) {
-    store.saveToken({ chain_id: 4663, address: addr, confidence: 'discovered', birth_block: 10, birth_tx: '0x1', birth_source: 'discovery' });
+    store.saveToken({ chain_id: 4663, address: addr, confidence: 'discovered', birth_block: 10, birth_tx: '0x1', birth_source: 'discovery', tx_from: '0xd0', premint: '{"v":2}' });
     store.q.addRef.run(4663, addr, emitter, t, 0, 10);
   }
   assert.equal(reattributeFromEvidence(store, reg, 4663), 1);
   const a = store.q.getToken.get(4663, '0xaa');
   assert.deepEqual([a.launchpad_id, a.confidence, a.factory], ['pons-v2', 'verified', PONS2]);
+  assert.equal(a.premint, null, 'its birth facts are read again as a registry launch (allocations were never counted for it)');
+  assert.equal(store.q.getToken.get(4663, '0xbb').premint, '{"v":2}');
   assert.equal(store.q.getToken.get(4663, '0xbb').launchpad_id, null, 'look-alike emitter stays unattributed');
   assert.equal(store.q.getToken.get(4663, '0xcc').launchpad_id, null, 'a different event from the real factory is not a creation event');
   assert.equal(reattributeFromEvidence(store, reg, 4663), 0, 'idempotent');

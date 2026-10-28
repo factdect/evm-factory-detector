@@ -99,7 +99,7 @@ export class BirthRecorder {
         tx_to: facts.txTo, mint_to: facts.mintTo, v4_hook: facts.v4Hook, platform: match?.platformAddr ?? null,
         tx_from: facts.txFrom, claim_app: match?.claimedLaunchpadId ?? null, claim_check: match?.claimCheck ?? null,
         // '{}' = receipt read, nothing minted outside the sale; NULL = receipt not read
-        premint: premint ? JSON.stringify(premint) : receipt ? '{"v":2}' : null,
+        premint: premint ? JSON.stringify(premint) : receipt ? '{"v":3}' : null,
       });
       for (const r of refsForToken(logs, token)) store.q.addRef.run(chain.id, token, r.emitter, r.topic0, r.logIndex, block ?? 0);
       store.q.markSeen.run(chain.id, token, block ?? 0, 1);
@@ -145,6 +145,9 @@ export function reattributeFromEvidence(store, registry, chainId) {
     WHERE t.chain_id = ? AND t.launchpad_id IS NULL ORDER BY r.log_index`).all(chainId);
   let n = 0;
   const done = new Set();
+  // a token recorded as unlisted had its birth read without counting allocations (that needs the
+  // launch event): clear the facts so the lookup reads them again as a registry launch
+  const clearFacts = store.db.prepare('UPDATE tokens SET premint = NULL WHERE chain_id = ? AND address = ?');
   store.db.transaction(() => {
     for (const row of rows) {
       if (done.has(row.address)) continue;
@@ -164,8 +167,31 @@ export function reattributeFromEvidence(store, registry, chainId) {
         factory: row.emitter, factory_label: entry.label ?? null, event_sig: hit.signature,
         family: JSON.stringify([...new Set(specs.map((s) => s.launchpadId))]),
       });
+      clearFacts.run(chainId, row.address);
       done.add(row.address);
       n++;
+    }
+  })();
+  return n;
+}
+
+/**
+ * On boot: pre-mint facts stored as v2 (update-18 to 20) counted the mint into a launch's per-token
+ * sale contract (Pons v2's curve, a pool) as an allocation unlocked at launch: every Pons v2 token
+ * read "100% of the supply was minted outside the sale". For launchpads whose launch event names that
+ * contract (a `sale` field), clear the v2 rows that list allocations. They show no pre-mint until a
+ * lookup reads their birth receipt again (v3). Idempotent: nothing matches once they are rewritten.
+ */
+export function resetSaleMintFacts(store, registry, chainId) {
+  const clear = store.db.prepare(`UPDATE tokens SET premint = NULL WHERE chain_id = ? AND factory = ?
+    AND premint LIKE '%"v":2%' AND premint LIKE '%"allocations"%'`);
+  let n = 0;
+  store.db.transaction(() => {
+    for (const specs of registry.byTopic0.values()) {
+      for (const s of specs) {
+        if (!s.saleFields?.length || s.platform) continue;
+        for (const emitter of s.emitters.keys()) n += clear.run(chainId, emitter).changes;
+      }
     }
   })();
   return n;

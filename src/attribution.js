@@ -109,7 +109,10 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
         // `wallets` says which launch senders the app itself uses; a claim from any other sender is a look-alike.
         known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), { ...v, wallets: walletRule(v.wallets), allocations: allocationRule(v.allocations) }])),
       } : null;
-      const spec = { launchpadId: lp.id, signature: ev.signature, topic0, token: ev.token, fields: ev.fields ?? {}, emitters, platform };
+      // a field marked `sale` names the per-token contract the supply is minted into to be sold (a
+      // bonding curve, the pool): a mint to it is the launch, not an allocation (see birthAllocations)
+      const saleFields = Object.entries(ev.fields ?? {}).filter(([, where]) => where?.sale).map(([name]) => name);
+      const spec = { launchpadId: lp.id, signature: ev.signature, topic0, token: ev.token, fields: ev.fields ?? {}, saleFields, emitters, platform };
       if (!byTopic0.has(topic0)) byTopic0.set(topic0, []);
       byTopic0.get(topic0).push(spec);
     }
@@ -198,7 +201,7 @@ export function storedPremint(premintText, txFrom) {
   if (premintText === null || premintText === undefined) return txFrom ? null : undefined;
   try {
     const p = JSON.parse(premintText);
-    return p && (p.allocations?.length || (p.escrowed && BigInt(p.escrowed) > 0n)) ? p : null; // {} and { v: 2 }: read, nothing
+    return p && (p.allocations?.length || (p.escrowed && BigInt(p.escrowed) > 0n)) ? p : null; // {}, { v: 2 }, { v: 3 }: read, nothing
   } catch { return undefined; }
 }
 
@@ -273,6 +276,7 @@ export function matchKnownEvent(registry, log) {
     fields,
     family: [...new Set(specs.map((s) => s.launchpadId))], // launchpads that use this event signature
     platform: hit?.platform ?? null, // protocol emitters: the launching app is resolved by a call
+    sale: hit ? (spec.saleFields ?? []).map((n) => fields[n]).filter((a) => /^0x[0-9a-f]{40}$/.test(a ?? '')) : [],
   };
 }
 
@@ -374,24 +378,33 @@ export function premintFacts(receipt, token) {
 /**
  * Supply minted at birth to anyone but the launch itself: what a launchpad allocated outside the
  * sale (o1's factories before 2026-08-30 minted up to 80% to any address). Mints to the token, to
- * the launchpad's own contracts (hooks, lockers, factories) and to shared plumbing are the launch;
+ * the launchpad's own contracts (hooks, lockers, factories), to the per-token sale contract its launch
+ * event names (a field marked `sale`: Pons v2's curve, a pool) and to shared plumbing are the launch;
  * a mint to one of the launchpad's vesting vaults is a vested allocation; anything else is an
- * allocation unlocked at launch. Returns the premint shape ({ v: 2, escrowed, schedules,
- * allocations }), or { v: 2 } when the birth minted nothing outside the launch.
+ * allocation unlocked at launch. Returns the premint shape ({ v: 3, escrowed, schedules,
+ * allocations }), or { v: 3 } when the birth minted nothing outside the launch. (v: 2, update-18,
+ * counted the mint into a per-token curve as a 100% allocation: every Pons v2 launch read "100% of the
+ * supply was minted outside the sale".)
  */
 export function birthAllocations(receipt, token, registry) {
   const t = lc(token);
+  const sale = new Set();
+  for (const l of receipt?.logs ?? []) {
+    const m = registry ? matchKnownEvent(registry, l) : null;
+    if (m && m.token === t && m.launchpadId) for (const a of m.sale) sale.add(a);
+  }
   const allocations = [];
   for (const l of receipt?.logs ?? []) {
     if (lc(l.address) !== t || lc(l.topics?.[0]) !== TRANSFER_TOPIC || l.topics.length !== 3 || lc(l.topics[1]) !== ZERO_TOPIC) continue;
     const to = '0x' + lc(l.topics[2]).slice(26);
-    if (to === t || to === '0x000000000000000000000000000000000000dead' || INFRA_ADDRESSES.has(to) || registry?.factoryOf?.has(to)) continue;
+    if (to === t || to === '0x000000000000000000000000000000000000dead' || INFRA_ADDRESSES.has(to) || registry?.factoryOf?.has(to) || sale.has(to)) continue;
     const companion = registry?.companionOf?.get(to);
-    const vault = Boolean(companion && /vesting|vault/i.test(companion.label ?? ''));
+    // only a vesting vault holds an allocation for someone; a fee or buyback vault is the launchpad's own
+    const vault = Boolean(companion && /vesting/i.test(companion.label ?? ''));
     if (companion && !vault) continue; // a hook, locker or deployer of the launchpad: the launch itself
     allocations.push({ to, scheduleId: null, amount: BigInt('0x' + ((l.data ?? '0x').slice(2, 66) || '0')).toString(), unlocked: !vault, via: vault ? 'vault' : 'mint' });
   }
-  return allocations.length ? { v: 2, escrowed: '0', schedules: {}, allocations } : { v: 2 };
+  return allocations.length ? { v: 3, escrowed: '0', schedules: {}, allocations } : { v: 3 };
 }
 
 export function platformCall(match, token) {

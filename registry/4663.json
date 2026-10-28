@@ -1,7 +1,7 @@
 {
   "chainId": 4663,
   "updated": "2026-10-28",
-  "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk.",
+  "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk. 2026-10-28 (update-21): added the Uniswap Liquidity Launcher (pools.trade), Bags, letscash.fun, Klik, DYOR.fun and ApeStore, and anoncoin as a Doppler integrator. Bottom.fun is known (factory 0x1bed2687321074a198302c004036b51923812b18, hook 0xd23c94bd8cbeb48c169c020e16a844aeab2368cc) but its contracts announce no launch event, so it cannot be attributed by event; the Doppler integrator 0xae478d7652b1ca5da070aa8563fce1570b420db5 (a Safe 2-of-4, also on Base and Ethereum, users on Coinbase Smart Wallets) is not identified yet and stays unlisted.",
   "launchpads": [
     {
       "id": "doppler",
@@ -67,6 +67,11 @@
                   "maxAllocations": 1,
                   "tolerancePct": 0.5
                 }
+              },
+              "0xd8a823e4e416df7a8bfa412ae06f5d5639a1db4d": {
+                "launchpad": "anoncoin",
+                "status": "observed",
+                "source": "Not published by anoncoin. On-chain 2026-10-28: 36 of 36 launches with this integrator in 24 h point tokenURI at cdn.anoncoin.it; the metadata of SPOOKYDOGE (0xa3b3e3c6b5a26b9a81f9b8f2e7934a207e50d09e) gives external_url anoncoin.it/coin/<token> and 'Network: Robinhood Chain', and that page is live. Launch senders are EOAs delegated (EIP-7702) to ZeroDev Kernel v3.3, shared with Bankr's, so there is no wallet rule."
               }
             }
           }
@@ -181,7 +186,8 @@
           "fields": {
             "curve": {
               "from": "topic",
-              "index": 2
+              "index": 2,
+              "sale": true
             },
             "deployer": {
               "from": "topic",
@@ -264,7 +270,8 @@
             },
             "pool": {
               "from": "data",
-              "word": 1
+              "word": 1,
+              "sale": true
             }
           },
           "emitters": [
@@ -375,7 +382,8 @@
             },
             "pool": {
               "from": "data",
-              "word": 1
+              "word": 1,
+              "sale": true
             }
           },
           "emitters": [
@@ -408,7 +416,8 @@
             },
             "pool": {
               "from": "data",
-              "word": 0
+              "word": 0,
+              "sale": true
             }
           },
           "emitters": [
@@ -714,6 +723,252 @@
           "label": "owner / creator admin"
         }
       ]
+    },
+    {
+      "id": "uniswap-launcher",
+      "name": "Uniswap Liquidity Launcher",
+      "url": "https://pools.trade",
+      "stack": "Uniswap Labs' launcher on Robinhood Chain: a LiquidityLauncher creates a UERC20 token and seeds a Uniswap v4 pool (Instant launch) or runs a continuous clearing auction first (Crowd launch). pools.trade is Uniswap Labs' app on it; other front ends (LaunchProof) use the same contracts, so this names the launcher, not the app.",
+      "events": [
+        {
+          "signature": "TokenCreated(address)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "emitters": [
+            {
+              "address": "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
+              "label": "LiquidityLauncher (current, since 2026-08-05)",
+              "status": "confirmed",
+              "source": "docs.bitquery.io/docs/blockchain/robinhood/pools-trade-api and docs.mobula.io/almanac/robinhood-launchpads/launchproof (both read 2026-10-28; the contract self-describes as the Uniswap LiquidityLauncher); on-chain 2026-10-28: 324 TokenCreated(address) in 7 days, token indexed, minted in the same transaction"
+            },
+            {
+              "address": "0x00004c4ccc709ef590f7c81102c0689f0263d4e9",
+              "label": "LiquidityLauncher (original, since 2026-07-08)",
+              "status": "confirmed",
+              "source": "docs.bitquery.io/docs/blockchain/robinhood/pools-trade-api (read 2026-10-28); on-chain 2026-10-28: 271 TokenCreated(address) in 7 days, still active"
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x000000e200088d55c39a11f609e5f667729ad49b",
+          "label": "UERC20 token factory"
+        },
+        {
+          "address": "0x23f8209572b4a1c2ad88a42749e830791fb027f1",
+          "label": "Instant launch strategy (creator fees)"
+        },
+        {
+          "address": "0xad44d55e7f8337c3ce113fbb591486e85be104b2",
+          "label": "Instant launch strategy (no creator fees)"
+        },
+        {
+          "address": "0xce57498d3474dcc244dfb6710ffbe6d4441cd2b2",
+          "label": "Instant launch strategy (original)"
+        },
+        {
+          "address": "0x60d73b21cdf2ea846ab3d58699bbbb8f29d72491",
+          "label": "Instant launch strategy (original, alt)"
+        },
+        {
+          "address": "0x05d552391067389ee44fec3924157ed33f976000",
+          "label": "LBP strategy (Crowd launches)"
+        },
+        {
+          "address": "0x000000001f26a0044baa66024e7b6599c61963f8",
+          "label": "CCA auction factory"
+        }
+      ]
+    },
+    {
+      "id": "bags",
+      "name": "Bags",
+      "url": "https://bags.fm",
+      "stack": "Bags' own contracts on Robinhood Chain (beta since 2026-07-11), not Doppler: a per-token bonding curve sells 830M of 1B, then migrates to a Uniswap v4 pool with the Bags hook and locked LP. 2% fee on the ETH leg.",
+      "events": [
+        {
+          "signature": "TokenCreated(address,address,address,address,address,bytes32,string,string,string)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "curve": {
+              "from": "topic",
+              "index": 2,
+              "sale": true
+            },
+            "creator": {
+              "from": "topic",
+              "index": 3
+            }
+          },
+          "emitters": [
+            {
+              "address": "0xe8cc4431adf8b5a847c113ef0c6af9043219cb37",
+              "label": "BagsFactory (proxy)",
+              "status": "confirmed",
+              "source": "docs.bags.fm/robinhood/contracts (Bags' own contracts reference, read 2026-10-28); on-chain 2026-10-28: 6 launches in 7 days, token topic 1, creator topic 3"
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x2380abf72c17aabab76480244759ac7e2932eecc",
+          "label": "BagsV4Hook"
+        },
+        {
+          "address": "0x4861446aa7ffd9e67a83cbbacb1a4b70540b83aa",
+          "label": "BagsVault (fee vault)"
+        },
+        {
+          "address": "0xc82db941daf90b754aecb5f7d14c683dc608d595",
+          "label": "BagsLens"
+        },
+        {
+          "address": "0x8dcecaf516c828a493c2c449c1e25f92cf80207e",
+          "label": "BagsBondingCurveBeacon"
+        },
+        {
+          "address": "0xdff07d39c5332c602e06fa64f0a97c92fd8537e0",
+          "label": "BagsFeeShareBeacon"
+        }
+      ]
+    },
+    {
+      "id": "letscash",
+      "name": "letscash.fun",
+      "url": "https://letscash.fun",
+      "stack": "Launchpad of the CASHCAT team (live since late July 2026), on Uniswap v4; protocol fees go to buyback and burn.",
+      "events": [
+        {
+          "topic0": "0x17091df68f499cf4e20dcfc5d42f064dd22359e785b77691c4c4ed0322608897",
+          "signature": "(unnamed letscash launch: token, creator, salt indexed; data: 1000, amounts, hook, creator)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "creator": {
+              "from": "topic",
+              "index": 2
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x5bd1fbe78a78fe8236fa00cf48fbeba74ae34661",
+              "label": "LAUNCHPAD_FACTORY",
+              "status": "confirmed",
+              "source": "letscash.fun's own front-end code names it LAUNCHPAD_FACTORY (read 2026-10-28); on-chain 2026-10-28: 654 launches in ~46 days, three events per launch, this one carries the token (topic 1) and its creator (topic 2) in every launch"
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x75a54357d9c78a2db19004a5fdc76c50f9242aec",
+          "label": "hook (in every launch and in the front end's hook list)"
+        },
+        {
+          "address": "0xefe669814e5eec33406bd50ffa8331618d076aec",
+          "label": "hook (front end's hook list)"
+        }
+      ]
+    },
+    {
+      "id": "klik",
+      "name": "Klik",
+      "url": "https://klik.finance",
+      "stack": "Uniswap v4 with the Klik hook: 1B tokens seeded, dynamic launch fees, no migration. Also on Ethereum and Base.",
+      "events": [
+        {
+          "topic0": "0x60122e78030aba0a2e4a67adb3e52b411343cc51778f919095d3fe394090c1b2",
+          "signature": "(unnamed Klik launch: data: token)",
+          "token": {
+            "from": "data",
+            "word": 0
+          },
+          "emitters": [
+            {
+              "address": "0x16cf6788b762ee8969744586ed16fc5705140dd7",
+              "label": "factory",
+              "status": "confirmed",
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/klik (read 2026-10-28; points to klik.finance/docs); on-chain 2026-10-28: 37 launches in 7 days, token in the only data word, minted in the same transaction"
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0x745d717620052a97a22deee2e5eba59583f3e0cc",
+          "label": "Klik hook"
+        }
+      ]
+    },
+    {
+      "id": "dyorfun",
+      "name": "DYOR.fun",
+      "url": null,
+      "stack": "Launch factory that opens a Uniswap v3 pool against WETH.",
+      "events": [
+        {
+          "signature": "TokenLaunched(address,address,address,address,address,uint256,uint256,uint256,string,address)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "creator": {
+              "from": "topic",
+              "index": 2
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x80b42aed46d73f47119dc444bea28a9e68f32bf4",
+              "label": "launch factory",
+              "status": "confirmed",
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/dyorfun (read 2026-10-28; on-chain the token, deployer and dex factory are indexed); on-chain 2026-10-28: last launch at block 94,643,863"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "apestore",
+      "name": "ApeStore",
+      "url": null,
+      "stack": "Launcher that opens a Uniswap v3-compatible WETH pair; completes at $69,000.",
+      "events": [
+        {
+          "topic0": "0xb378e89b40ac5bbe0e2241b596fbe1adc3cf1fb7c982aa1b4560165cf264ee93",
+          "signature": "(unnamed ApeStore launch: token, launch number indexed)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "emitters": [
+            {
+              "address": "0x6e4910ea5a04376032f6564da9a9e4e88b7a87c1",
+              "label": "ApeStore launcher",
+              "status": "confirmed",
+              "source": "docs.mobula.io/almanac/robinhood-launchpads/apestore (read 2026-10-28); on-chain 2026-10-28: 91 launches between blocks 40.2M and 73.0M, none since"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "anoncoin",
+      "name": "anoncoin",
+      "url": "https://anoncoin.it",
+      "stack": "Launches through the Doppler protocol (Airlock). Identified on-chain by its integrator address and its metadata host; not published by anoncoin.",
+      "events": [],
+      "contracts": []
     }
   ],
   "quoteIssuers": [

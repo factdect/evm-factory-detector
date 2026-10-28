@@ -35,7 +35,7 @@ test('birthAllocations: a mint at birth to anyone but the launch is an allocatio
   assert.deepEqual(p.allocations, [{ to: FARM, scheduleId: null, amount: (290_000_000n * E18).toString(), unlocked: true, via: 'mint' }]);
   const vested = birthAllocations({ logs: [mint(HAT, V2_VAULT, 50_000_000n), mint(HAT, V2_HOOK, 950_000_000n)] }, HAT, reg);
   assert.deepEqual(vested.allocations.map((a) => [a.to, a.unlocked, a.via]), [[V2_VAULT, false, 'vault']]);
-  assert.deepEqual(birthAllocations({ logs: [mint(HAT, V2_HOOK, 1_000_000_000n)] }, HAT, reg), { v: 2 }, 'MOO: everything into the pool');
+  assert.deepEqual(birthAllocations({ logs: [mint(HAT, V2_HOOK, 1_000_000_000n)] }, HAT, reg), { v: 3 }, 'MOO: everything into the pool');
   assert.equal(storedPremint('{"v":2}', CREATOR), null, 'read, nothing');
 });
 

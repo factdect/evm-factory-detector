@@ -394,7 +394,7 @@ export class Lookup {
       const sender = receipt.from ? receipt.from.toLowerCase() : null;
       const registryLaunch = row.factory && reg.factoryOf.has(row.factory) && !row.platform;
       const premint = premintFacts(receipt, row.address) ?? (registryLaunch ? birthAllocations(receipt, row.address, reg) : null);
-      const stored = premint ? JSON.stringify(premint) : '{"v":2}';
+      const stored = premint ? JSON.stringify(premint) : '{"v":3}';
       this.store.q.setBirthFacts.run(sender, stored, chain.id, row.address);
       let next = { ...row, tx_from: sender, premint: stored };
       if (allocOnly) return next;
@@ -420,13 +420,16 @@ export class Lookup {
 
   /**
    * A registry launch (not a protocol one) whose birth was read before allocations minted at birth
-   * were counted (update-18), e.g. an o1 token indexed as unlisted and re-attributed from evidence.
+   * were counted (update-18), e.g. an o1 token indexed as unlisted and re-attributed from evidence,
+   * or read by update-18..20 with allocations (v2) that may be its own per-token sale contract.
    */
   #needsAllocFacts(chainId, row) {
     const reg = this.registries.get(chainId);
     if (!reg || !row.birth_tx || !row.factory || row.platform || !reg.factoryOf.has(row.factory)) return false;
     if ((reg.platformSpecs ?? []).some((s) => s.factory === row.factory)) return false;
-    return !String(row.premint ?? '').includes('"v":2');
+    // v3 counts the per-token sale contract as the launch; a v2 row with allocations may hold one
+    const p = String(row.premint ?? '');
+    return !(p.includes('"v":3') || (p.includes('"v":2') && !p.includes('"allocations"')));
   }
 
   /** The row passed to #shape, with live B20 controls for a B20 token. */

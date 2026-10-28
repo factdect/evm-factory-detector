@@ -17,6 +17,21 @@ Trading terminals label launchpad tokens from a hand-maintained allowlist of fac
 
 Some creation events belong to a permissionless *protocol*, not an app. Doppler's Airlock (canonical on Robinhood Chain, per docs.doppler.lol) emits the same `Create` for Long.xyz and for anyone else who calls it. The launching app is stored per asset (`getAssetData(asset).integrator`), so the registry lets an event carry a `platform` resolver: the indexer reads the integrator at record time, maps known integrators to their launchpad, and labels the rest `protocol-verified` ("Doppler, unlisted app"). Rows indexed before a resolver existed are re-checked in idle time. On 2026-09-21 about a third of Doppler launches on Robinhood Chain came from integrators other than Long's.
 
+### Robinhood Chain coverage (update-21, 2026-10-28)
+
+An audit against the launchpads' own docs, Mobula's and Bitquery's integration guides, the apps' front-end code and the chain itself added six launchpads and one Doppler app. Each was checked on a real launch log: the token sits where the registry says, and was minted in that transaction.
+
+| Launchpad | Creation event (emitter) | Volume seen on 2026-10-28 |
+| --- | --- | --- |
+| Uniswap Liquidity Launcher (pools.trade) | `TokenCreated(address)` from the two LiquidityLaunchers | about 85 a day, the busiest launcher on the chain |
+| letscash.fun | unnamed event, token in topic 1 (`LAUNCHPAD_FACTORY` in its front end) | about 14 a day |
+| Klik | unnamed event, token in the only data word | about 5 a day |
+| Bags | `TokenCreated(…)` from BagsFactory (Bags' own contracts, not Doppler) | 6 in a week |
+| DYOR.fun, ApeStore | `TokenLaunched(…)`; unnamed event, token in topic 1 | quiet: last launches around 2026-10-22 and 2026-09-27 |
+| anoncoin | Doppler integrator `0xd8a823e4…` (its tokens' metadata lives on `cdn.anoncoin.it`) | about 36 a day |
+
+The Uniswap launcher is shared: pools.trade is Uniswap Labs' app on it, and other front ends (LaunchProof) launch through the same contracts, so the verdict names the launcher, not the app. Tokens already indexed move to the new launchpads on the next boot (from their stored birth evidence, and anoncoin rows by their stored integrator), and the stall-gap replay now picks up these events too. Not covered: Bottom.fun (its factory, hook and registry announce no launch event, so it cannot be attributed by event), and the Doppler integrator `0xae478d76…` (a 2-of-4 Safe that is also an integrator on Base, whose users launch from Coinbase Smart Wallets; it is not Bags, which does not use Doppler) until the app behind it is known.
+
 ### Tokens born before the index
 
 A token with no indexed birth is not a dead end. Permissionless protocols keep their own per-asset record on-chain (Doppler: `Airlock.getAssetData`), so the lookup asks each registered protocol factory live, one `eth_call` each, and attributes the token from the integrator it finds. No explorer key is needed for that; the key only adds tracing for tokens no protocol knows. The response says how the verdict was obtained in `bytecode.attributionSource` (`indexed-birth` or `live-protocol-call`).
@@ -53,6 +68,8 @@ A sender off the list alone is not a verdict: Bankr also launches from plain EOA
 ### Pre-mint: supply that can be sold from the first block
 
 A bonding curve only prices what is sold through it. Doppler's token (DopplerERC20V1) can mint up to 80% of the supply to any wallets at birth, under vesting schedules whose duration may be 0 ("instant"). Those allocations are events in the birth receipt, so every Doppler launch gets `premint`: the share minted outside the sale, the share unlocked at launch, and each allocation with its cliff and duration (a schedule with no cliff that finishes within a day counts as unlocked at launch). The page shows it as "Pre-minted: 25% of supply; 24% → 0xbe51… (unlocked at launch); 1% → 0xa032… (vesting 30-day cliff, 365 days)", and `verdict.warnings` leads with it. Bankr's own launches carry 15% with a 30-day cliff and a 1-year vest, which shows as 15% pre-minted, 0% unlocked.
+
+Other launchpads do not announce allocations; a mint at birth to anyone but the launch counts as one. "The launch" is the token, the launchpad's factories, hooks and lockers, shared plumbing, and the per-token contract the supply is minted into to be sold: a launch-event field marked `"sale": true` in the registry (Pons v2's and Bags' curve, the pool of Pons v1, NoxaFun and Bow.fun). Update-18 to 20 lacked that last rule and called every Pons v2 token "100% of the supply was minted outside the sale"; update-21 clears those stored facts on boot and re-reads each token's birth receipt on its next lookup (stored pre-mint facts carry `"v":3` from then on). Only a contract labelled as a *vesting* vault holds a vested allocation; a fee or buyback vault is the launchpad's own. Checked on 2026-10-28 against the latest real launch of every launchpad in both registries: no allocation is reported except o1's documented pre-2026-08-30 ones.
 
 ### o1 Launchpad and Base-native B20 tokens
 
