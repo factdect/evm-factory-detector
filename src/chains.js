@@ -2,7 +2,7 @@
 // for every chain; only these numbers, the RPC URL and the launchpad registry change.
 //
 // Override per chain with env vars:  RPC_<id>, RPC_HEADERS_<id> (JSON), MIN_INTERVAL_MS_<id>,
-// LOGS_CHUNK_<id>, STATE_WINDOW_<id> (0 = unlimited, use with an archive RPC), START_BLOCK_<id>,
+// LOGS_CHUNK_<id>, POLL_MS_<id>, STATE_WINDOW_<id> (0 = unlimited, use with an archive RPC), START_BLOCK_<id>,
 // MAX_LAG_BLOCKS_<id> (0 = never jump ahead after a stall), ADDR_LOGS_SPAN_<id>,
 // BIRTH_SCAN_WINDOWS_<id> (0 = a lookup never searches the birth of an unindexed protocol token).
 // Global: BACKFILL=off (do not replay stall gaps), RETAIN_REFS_DAYS (0 = keep all birth evidence),
@@ -77,6 +77,9 @@ export function loadChains(env = process.env) {
     c.rpcHeaders = env[`RPC_HEADERS_${id}`] ? JSON.parse(env[`RPC_HEADERS_${id}`]) : {};
     c.minIntervalMs = num(env[`MIN_INTERVAL_MS_${id}`], c.minIntervalMs);
     c.logsChunk = num(env[`LOGS_CHUNK_${id}`], c.logsChunk);
+    // how often the live loop asks for new blocks: every poll costs a few calls (head, known events,
+    // fresh mints), which is what a metered RPC bills for
+    c.pollMs = num(env[`POLL_MS_${id}`], c.pollMs);
     c.stateWindow = num(env[`STATE_WINDOW_${id}`], c.stateWindow);
     c.startBlock = num(env[`START_BLOCK_${id}`], null);
     // Factory statistics (tokens announced, template purity) look at the last 3 days by default.

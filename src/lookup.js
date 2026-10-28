@@ -474,6 +474,8 @@ export class Lookup {
     } else if (claim?.result === 'unverified' && claimed) {
       warnings.push(claim.wallet === 'failed' && claim.allocations === 'verified'
         ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets; what was minted at birth matches ${claimed.name}'s policy, so the label is kept but not confirmed.`
+        : claim.wallet === null && claim.allocations === 'verified'
+          ? `What was minted at birth matches ${claimed.name}'s policy, but on this chain nothing on-chain ties a launch to ${claimed.name} (anyone can use its integrator address and template), so the label is kept but not confirmed.`
         : claim.wallet === 'failed'
           ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets, and what was minted at birth could not be read; the label is kept but not confirmed.`
           : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);

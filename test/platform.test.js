@@ -8,10 +8,18 @@ import { BirthRecorder, probePendingBirthFacts, probePendingPlatforms, rejudgeSt
 import { openDb } from '../src/db.js';
 import { Lookup } from '../src/lookup.js';
 
-const reg = loadRegistry(4663);
 const AIRLOCK = '0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862';
 const BANKR = '0xf60633d02690e2a15a54ab919925f3d038df163e';
 const BANKR_7702 = '0xd6cedde84be40893d153be9d467cd6ad37875b28';
+// The shipped Robinhood registry has no Bankr wallet rule: the delegate its wallets use is ZeroDev
+// Kernel v3.3, shared by other apps. Most tests below exercise the wallet mechanics, so they run on a
+// copy that has one, as a registry may for an implementation an app alone uses.
+const withBankrWallets = (r) => {
+  r.platformSpecs.find((s) => s.factory === AIRLOCK).platform.known.get(BANKR).wallets = { status: 'observed', source: 'test', senders: new Set(), eip7702Delegates: new Set([BANKR_7702]) };
+  return r;
+};
+const reg = withBankrWallets(loadRegistry(4663));
+const shipped = loadRegistry(4663);
 const DRS = '0xe2943e4ba51bb08c1222f2a95b10ce4bb18ecba3';
 const DUMPER = '0xbe5184be49af5aeaba84a6872afc1814db87214f';
 const LAUNCHER = '0xa032ab028968ccf8430165f77486bc805e5d789e';
@@ -288,6 +296,8 @@ test('chains: the birth scan is on for Robinhood Chain, off for Base on its publ
   assert.equal(loadChains({ CHAINS: '8453' }).get(8453).birthScanWindows, 0);
   assert.equal(loadChains({ CHAINS: '8453', RPC_8453: 'https://example.invalid' }).get(8453).birthScanWindows, 24);
   assert.equal(loadChains({ CHAINS: '4663', BIRTH_SCAN_WINDOWS_4663: '0' }).get(4663).birthScanWindows, 0);
+  const base = loadChains({ CHAINS: '8453', RPC_8453: 'https://example.invalid', POLL_MS_8453: '6000', ADDR_LOGS_SPAN_8453: '100000' }).get(8453);
+  assert.deepEqual([base.pollMs, base.addrLogsSpan, base.birthScanWindows, base.publicRpc], [6000, 100000, 24, false]);
 });
 
 // update-15: the review of update-14
@@ -364,7 +374,7 @@ test('update-13 rows: completing them is rate-limited, and a missing receipt is 
 
 test('boot: stored claims are judged again when the registry changes, from stored facts only', () => {
   const store = openDb(':memory:');
-  const r2 = loadRegistry(4663);
+  const r2 = withBankrWallets(loadRegistry(4663));
   const k = r2.byTopic0.get(CREATE_T0)[0].platform.known.get(BANKR);
   const row = (address, tx_from, premint, claim) => ({ chain_id: 4663, address, factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', platform: BANKR, birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event',
     total_supply: SUPPLY, tx_from, premint, claim_app: 'bankr', claim_check: JSON.stringify(claim), ...(claim.result === 'failed' ? { launchpad_id: 'doppler', confidence: 'look-alike-platform' } : { launchpad_id: 'bankr', confidence: 'observed-emitter' }) });
@@ -387,4 +397,29 @@ test('premintPending: rows outside the window are not selected, and the query us
   assert.deepEqual(store.q.premintPending.all(4663, AIRLOCK, 1000, 8).map((r) => r.birth_block), [5000]);
   const plan = store.db.prepare(`EXPLAIN QUERY PLAN ${store.q.premintPending.source}`).all(4663, AIRLOCK, 0, 8).map((r) => r.detail).join(' ');
   assert.match(plan, /tokens_facts_pending/);
+});
+
+test('shipped Robinhood registry: no Bankr wallet rule (ZeroDev Kernel is shared), so a Bankr claim is refuted by its allocation or kept unconfirmed; Base keeps its four hot wallets', async () => {
+  const m = matchKnownEvent(shipped, createLog());
+  const k = m.platform.known.get(BANKR);
+  assert.equal(k.wallets, null);
+  assert.equal(platformNeedsSender(m), false, 'no code call for the sender on this chain');
+  // a genuine Bankr launch from a Kernel-delegated wallet: on-policy, label kept, not confirmed
+  const qos = resolvePlatform(m, assetData(BANKR), '0xbad608307d46fb8e9d878428ca138542861adfea', code7702(BANKR_7702), BANKR_15, SUPPLY);
+  assert.deepEqual([qos.launchpadId, JSON.parse(qos.claimCheck)], ['bankr', { result: 'unverified', wallet: null, allocations: 'verified' }]);
+  const drs = resolvePlatform(m, assetData(BANKR), LAUNCHER, '0x', INSTANT_24, SUPPLY);
+  assert.deepEqual([drs.launchpadId, drs.confidence, JSON.parse(drs.claimCheck)], ['doppler', 'look-alike-platform', { result: 'failed', wallet: null, allocations: 'failed' }]);
+  const base = loadRegistry(8453);
+  const kb = base.platformSpecs[0].platform.known.get(BANKR);
+  assert.equal(kb.wallets.senders.size, 4);
+  assert.equal(kb.allocations.maxAllocations, 1);
+  // the page says why the label is not confirmed
+  const store = openDb(':memory:');
+  const chain = chainOf();
+  store.saveToken({ chain_id: 4663, address: DRS, confidence: 'observed-emitter', launchpad_id: 'bankr', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', platform: BANKR,
+    birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event', total_supply: SUPPLY, tx_from: '0xbad608307d46fb8e9d878428ca138542861adfea', premint: JSON.stringify(BANKR_15), claim_app: 'bankr', claim_check: qos.claimCheck, name: 'Q', symbol: 'Q', decimals: 18 });
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, { batch: async (cs) => cs.map(() => ({ result: '0x' })) }]]), registries: new Map([[4663, shipped]]), store });
+  const b = (await lk.token(4663, DRS)).body;
+  assert.equal(b.launchpad.id, 'bankr');
+  assert.match(b.verdict.warnings.at(-1), /nothing on-chain ties a launch to Bankr/);
 });

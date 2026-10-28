@@ -72,7 +72,7 @@
         else if (p.status === 'look-alike') bits.push(`integrator field names ${p.claims?.name ?? short(p.integrator)}${p.allocationCheck === 'failed' ? ', with an allocation its launch flow does not produce' : ''}${p.senderCheck === 'failed' ? `, sent by ${p.sender ? short(p.sender) : 'a wallet'} that is not one of its wallets` : ''}`);
         else bits.push(`app ${short(p.integrator)}${p.senderCheck === 'verified' ? `, launch sent by a ${p.claims?.name ?? 'known'} wallet`
           : p.senderCheck === 'failed' ? `, launch sender not a known ${p.claims?.name ?? 'app'} wallet${p.allocationCheck === 'verified' ? ' (allocation within its policy, label kept)' : ''}`
-          : p.claimCheck === 'unverified' ? ', launch sender not checked' : ''}`);
+          : p.claimCheck === 'unverified' ? (p.allocationCheck === 'verified' ? `, allocation within ${p.claims?.name ?? 'its'}'s policy, not confirmed` : ', not checked') : ''}`);
       }
       if (d.factory.event) bits.push(`event ${d.factory.event.split('(')[0]}`);
       if (d.factory.tokensAnnounced != null) bits.push(`${plural(d.factory.tokensAnnounced, 'token', 'tokens')} announced recently`);

@@ -52,15 +52,7 @@
               "0xf60633d02690e2a15a54ab919925f3d038df163e": {
                 "launchpad": "bankr",
                 "status": "observed",
-                "source": "Not published by Bankr. On-chain 2026-09-23: this integrator launched musebook and Agrippa, both traded on bankr.bot's terminal; Bankr is a documented Doppler integrator; every sampled token from it carries the 'ba3' address suffix (vanity, like Long's 1e18) and a 100B supply. On-chain 2026-10-27: 53 of 53 launches sent by Bankr's own wallets carried the documented 15% vesting (30-day cliff, 1 year) or none; 19 launches with instantly unlocked allocations (14-50% of supply) all came from plain EOAs outside Bankr's wallets, and none of them is listed on bankr.bot.",
-                "wallets": {
-                  "status": "observed",
-                  "source": "On-chain 2026-10-27: every Bankr launch sent from a Bankr-managed wallet on this chain (53 in 55 h, 31 wallets) is an EOA with an EIP-7702 delegation to this implementation; no launch with any other integrator uses it. Bankr also launches from plain EOAs (partner/org keys, CLI): 6 such launches in the same window are listed on bankr.bot and all carry Bankr's two documented allocations. So a non-Bankr sender alone is not a verdict; with an allocation outside Bankr's policy it is. The 19 instant-allocation launches (14-50% unlocked) were all plain EOAs and none is listed on bankr.bot.",
-                  "eip7702Delegates": [
-                    "0xd6cedde84be40893d153be9d467cd6ad37875b28"
-                  ],
-                  "senders": []
-                },
+                "source": "Not published by Bankr. On-chain 2026-09-23: this integrator launched musebook and Agrippa, both traded on bankr.bot's terminal; Bankr is a documented Doppler integrator; every sampled token from it carries the 'ba3' address suffix (vanity, like Long's 1e18) and a 100B supply. On-chain 2026-10-27: 72 of 78 launches carried Bankr's documented allocation (15%, 30-day cliff, 1 year) or none; the 19 with instantly unlocked allocations (14-50% of supply) are not listed on bankr.bot. No wallet rule on this chain: Bankr's launch wallets are EOAs delegated (EIP-7702) to ZeroDev Kernel v3.3 (0xd6cedde84be40893d153be9d467cd6ad37875b28, accountId kernel.advanced.v0.3.3), a public account implementation that other apps' users have too (anoncoin's smart accounts, 2026-10-27), so it cannot tell a Bankr launch from anyone else's. A claim here can be refuted by its allocation, never confirmed by its sender.",
                 "allocations": {
                   "status": "documented",
                   "source": "docs.bankr.bot (token-launching/overview, faq/token-launching) and the launch form, checked 2026-10-27: 'Creator vesting: 15% ... vests over 1 year with a 30-day cliff' or 'No vesting' (100% into the pool); 'A Doppler launch has no custom percentage or schedule.' Partner/org launches sell 100% with no vest.",

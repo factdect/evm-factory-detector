@@ -156,7 +156,7 @@
                 "source": "Same integrator address as on Robinhood Chain (docs.bankr.bot: Doppler launches on Base, Robinhood Chain and Arbitrum). On-chain 2026-10-27: 65 Bankr-integrator launches in 11 h on Base.",
                 "wallets": {
                   "status": "observed",
-                  "source": "On-chain 2026-10-27: the 12 newest Bankr-integrator launches on Base were sent by these four hot wallets (nonces 300k-540k), each with the documented 15% vesting (30-day cliff, 1 year) to a separate fee recipient. Add a wallet when a launch listed on bankr.bot comes from a new one.",
+                  "source": "On-chain 2026-10-27: Bankr's own hot wallets (plain EOAs, nonces 300k-540k, used for nothing but Bankr launches). The 12 newest Bankr-integrator launches, and later 25 of 25 sampled from 84 in 11 hours, were sent by these four, each with one VestingAllocated of 15% (30-day cliff, 1 year) from a 44-byte DopplerERC20V1 clone. Add a wallet when a launch listed on bankr.bot comes from a new one.",
                   "senders": [
                     "0x710680d1711f284e9acd905b69b0ac5d6e399ed6",
                     "0x2d3faeac23567d32b249b2325689f6f76dda4a28",
