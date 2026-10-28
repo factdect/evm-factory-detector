@@ -2,6 +2,7 @@
 // *while the index was running*. A launchpad that has been live for a month looks brand new to
 // an index that started yesterday. One address-filtered eth_getLogs lookback settles it without
 // tracing or archive state: any log before the first sighting means the contract is older.
+// (Several calls, small windows first: see FIRST_WINDOW.)
 
 import { hex, isCallerRefusal, rangeCapFrom, RpcError } from './rpc.js';
 
@@ -10,6 +11,21 @@ import { hex, isCallerRefusal, rangeCapFrom, RpcError } from './rpc.js';
 const learnedCap = new Map();
 /** The span this probe asks for on a chain: the configured one, or a cap the node stated. */
 export const probeSpan = (chain) => Math.max(1, Math.min(chain.addrLogsSpan, learnedCap.get(chain.id) ?? Infinity));
+
+// The probe filters by address only, so the node returns every log the address emitted in the
+// range. It starts with a small window and grows it 8x per step (up to probeSpan): a busy address
+// is answered from its first few hundred blocks, a quiet one costs a handful of calls. Asking for the
+// whole lookback at once (one call on Base with ADDR_LOGS_SPAN_8453=100000) made Alchemy return a
+// busy announcer's entire week, 13 s of download, too many logs for Math.min(...spread) (2026-10-28,
+// "background ages: Maximum call stack size exceeded", retried every few minutes).
+export const FIRST_WINDOW = 200;
+const GROWTH = 8;
+/** Earliest block number in a log list, without spreading it into arguments. */
+export function earliestBlock(logs) {
+  let min = null;
+  for (const l of logs) { const n = Number(l.blockNumber); if (min === null || n < min) min = n; }
+  return min;
+}
 
 /**
  * First block in [head - lookback, beforeBlock) where `address` emitted a log, or `beforeBlock`
@@ -28,7 +44,7 @@ export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
   const firstIn = async (a, b) => {
     try {
       const logs = await rpc.call('eth_getLogs', [{ address, fromBlock: hex(a), toBlock: hex(b) }]);
-      return logs.length ? Math.min(...logs.map((l) => Number(l.blockNumber))) : null;
+      return earliestBlock(logs);
     } catch (e) {
       if (isCallerRefusal(e)) throw e; // rate limit / quota: retried later; a guess here would be a false "old"
       const cap = rangeCapFrom(e);
@@ -49,12 +65,14 @@ export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
       return (await firstIn(a, mid)) ?? (await firstIn(mid + 1, b));
     }
   };
+  let want = FIRST_WINDOW;
   for (let a = lookbackFrom; a < beforeBlock; ) {
-    const span = probeSpan(chain); // re-read: a stated cap shrinks it mid-probe
+    const span = Math.min(probeSpan(chain), want); // re-read: a stated cap shrinks it mid-probe
     const b = Math.min(a + span - 1, beforeBlock - 1);
     const found = await firstIn(a, b);
     if (found !== null) return { firstLogBlock: found, lookbackFrom };
     a = b + 1;
+    want *= GROWTH;
   }
   return { firstLogBlock: beforeBlock, lookbackFrom };
 }

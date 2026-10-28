@@ -144,7 +144,7 @@ export class Rpc {
             const now = Date.now();
             const i = this.lowQueue.findIndex((j) => j.notBefore <= now);
             if (i >= 0) job = this.lowQueue.splice(i, 1)[0];
-            else { this.#wakeLater(Math.min(...this.lowQueue.map((j) => j.notBefore)) - now); break; }
+            else { this.#wakeLater(this.lowQueue.reduce((m, j) => Math.min(m, j.notBefore), Infinity) - now); break; }
           }
         }
         if (!job) break;
@@ -280,7 +280,7 @@ export async function getLogsRange(rpc, filter, from, to, state, softCap = 9500)
       throw e;
     }
     if (logs.length >= softCap && b > a) { state.span = Math.max(1, Math.floor((b - a + 1) / 2)); continue; }
-    out.push(...logs);
+    for (const l of logs) out.push(l); // no spread: a single-block range may exceed softCap
     a = b + 1;
     if (state.span < state.max) state.span = Math.min(state.max, Math.ceil(state.span * 1.5));
   }

@@ -450,3 +450,21 @@ test('a result-size refusal is not a range cap: Alchemy names its 10,000-block p
   assert.equal(got.length, 1);
   assert.equal(state.max, 100_000);
 });
+
+test('age probe on a busy address: small windows first, and a huge answer does not overflow (update-20)', async () => {
+  const { probeFirstLog: probe, earliestBlock, FIRST_WINDOW } = await import('../src/age.js');
+  // 2026-10-28 on Base: one 86,400-block call returned a busy announcer's whole week; Math.min(...logs) threw
+  const many = Array.from({ length: 300_000 }, (_, i) => ({ blockNumber: '0x' + (5000 + (i % 100)).toString(16) }));
+  assert.equal(earliestBlock(many), 5000);
+  assert.equal(earliestBlock([]), null);
+  const chain = { id: 99003, ageLookbackBlocks: 86_400, addrLogsSpan: 100_000 };
+  const asked = [];
+  const busy = { call: async (_m, [f]) => { const a = Number(f.fromBlock), b = Number(f.toBlock); asked.push(b - a + 1); return many.map((l, i) => ({ blockNumber: '0x' + (a + (i % (b - a + 1))).toString(16) })); } };
+  assert.deepEqual(await probe(busy, chain, '0xbusy', 100_000, 99_000), { firstLogBlock: 13_600, lookbackFrom: 13_600 });
+  assert.deepEqual(asked, [FIRST_WINDOW], 'a busy address is answered from the first small window');
+  // a quiet address on Base settings: 200, 1,600, 12,800, then the rest of the week in one call
+  asked.length = 0;
+  const quiet = { call: async (_m, [f]) => { asked.push(Number(f.toBlock) - Number(f.fromBlock) + 1); return []; } };
+  assert.deepEqual(await probe(quiet, chain, '0xquiet', 100_000, 100_000), { firstLogBlock: 100_000, lookbackFrom: 13_600 });
+  assert.deepEqual(asked, [200, 1600, 12_800, 71_800]);
+});

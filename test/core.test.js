@@ -344,9 +344,9 @@ test('probeFirstLog: finds the earliest log, treats a refused (too busy) range a
   // logs at 1500 and 1700; lookback starts at 1000
   assert.deepEqual(await probeFirstLog(rpcWith((a, b) => [1500, 1700].filter((x) => x >= a && x <= b).map((x) => ({ blockNumber: '0x' + x.toString(16) }))), chain, '0xabc', 2000, 1900),
     { firstLogBlock: 1500, lookbackFrom: 1000 });
-  assert.deepEqual(asked, [[1000, 1299], [1300, 1599]], 'stops at the first chunk with a log');
-  assert.deepEqual(await probeFirstLog(rpcWith((a) => { if (a === 1300) throw new RpcError('eth_getLogs', { message: 'query returned more than 10000 results' }); return []; }), chain, '0xabc', 2000, 1900),
-    { firstLogBlock: 1300, lookbackFrom: 1000 });
+  assert.deepEqual(asked, [[1000, 1199], [1200, 1499], [1500, 1799]], 'a 200-block first window, then the span; stops at the first chunk with a log');
+  assert.deepEqual(await probeFirstLog(rpcWith((a) => { if (a === 1200) throw new RpcError('eth_getLogs', { message: 'query returned more than 10000 results' }); return []; }), chain, '0xabc', 2000, 1900),
+    { firstLogBlock: 1200, lookbackFrom: 1000 });
   assert.deepEqual(await probeFirstLog(rpcWith(() => []), chain, '0xabc', 2000, 1900), { firstLogBlock: 1900, lookbackFrom: 1000 });
   // Base answers a too-heavy range with a bare HTTP 500: split it instead of failing the whole probe
   let seen = 0;
