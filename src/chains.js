@@ -46,6 +46,8 @@ const DEFAULTS = {
     addrLogsSpan: 2000,
     // ~4,000 token births a day: date announcers over 2 days, not 7, to keep the probe cheap
     ageLookbackBlocks: 86_400,
+    // Base-native B20 tokens (Beryl upgrade, 2026-07-08): their creation is a log of this precompile
+    b20: { factory: '0xb20f000000000000000000000000000000000000', fromBlock: 48_300_000 },
     logsSoftCap: 9500,
     confirmations: 5,
     pollMs: 4000,

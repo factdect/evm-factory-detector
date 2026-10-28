@@ -1,6 +1,6 @@
 // Records one token birth: enrich (code, metadata, receipt), attribute, persist.
 // Shared by the indexer and by on-demand lookups so both apply the same rules.
-import { checkAllocations, claimPlacement, claimResult, judgeClaim, matchKnownEvent, pad32, parseClaim, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, storedPremint, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
+import { birthAllocations, checkAllocations, claimPlacement, claimResult, judgeClaim, matchKnownEvent, pad32, parseClaim, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, storedPremint, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { fingerprint } from './fingerprint.js';
 
@@ -82,7 +82,8 @@ export class BirthRecorder {
     }
 
     const facts = birthFacts(receipt, token);
-    const premint = premintFacts(receipt, token);
+    // Doppler announces its allocations as events; other launchpads simply mint them at birth
+    const premint = premintFacts(receipt, token) ?? (receipt && match && !match.platform ? birthAllocations(receipt, token, registry) : null);
     let saved;
     store.db.transaction(() => {
       saved = store.saveToken({
@@ -98,7 +99,7 @@ export class BirthRecorder {
         tx_to: facts.txTo, mint_to: facts.mintTo, v4_hook: facts.v4Hook, platform: match?.platformAddr ?? null,
         tx_from: facts.txFrom, claim_app: match?.claimedLaunchpadId ?? null, claim_check: match?.claimCheck ?? null,
         // '{}' = receipt read, nothing minted outside the sale; NULL = receipt not read
-        premint: premint ? JSON.stringify(premint) : receipt ? '{}' : null,
+        premint: premint ? JSON.stringify(premint) : receipt ? '{"v":2}' : null,
       });
       for (const r of refsForToken(logs, token)) store.q.addRef.run(chain.id, token, r.emitter, r.topic0, r.logIndex, block ?? 0);
       store.q.markSeen.run(chain.id, token, block ?? 0, 1);

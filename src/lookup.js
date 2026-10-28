@@ -1,5 +1,5 @@
 // Turns index rows into the public JSON. The lookup page renders exactly this JSON.
-import { claimPlacement, INFRA_ADDRESSES, INFRA_TOPICS, judgeClaim, matchKnownEvent, parseClaim, platformCall, premintFacts, resolvePlatform, senderCodeCall, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
+import { B20_CREATED_TOPIC, B20_POLICY_REGISTRY, B20_POLICY_SCOPES, B20_ROLES, birthAllocations, claimPlacement, INFRA_ADDRESSES, INFRA_TOPICS, isB20, pad32, ROLE_GRANTED_TOPIC, judgeClaim, matchKnownEvent, parseClaim, platformCall, premintFacts, resolvePlatform, senderCodeCall, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { BirthRecorder } from './births.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { findCreation } from './explorer.js';
@@ -22,6 +22,7 @@ const VERDICTS = {
   'discovered-silent': ['No factory event', 'The contract appeared and minted in one transaction, and no other contract announced it. Deployed directly, or by a factory that emits nothing.'],
   'evidence-pruned': ['Unlisted, evidence pruned', 'No launchpad in the registry claims this token. The list of contracts that announced it at birth was deleted to save space (old birth evidence is pruned when the volume runs low), so who made it cannot be shown any more. The birth transaction below still can be checked by hand.'],
   'bytecode-cluster': ['Bytecode match only', 'The birth transaction is not indexed. The bytecode matches a template used by a known launchpad, which shows the template, not who deployed it.'],
+  'b20-unlisted': ['B20 token, no known launchpad', 'A native Base B20 token created through the B20 precompile, either directly by its deployer or by a contract no launchpad publishes. Every B20 token shows the same precompile as its creator, so a terminal that reads the creator field alone cannot tell a launchpad token from a hand-made one. Read the controls below: who can still mint, block transfers or move balances.'],
   none: ['No birth record', 'This index holds no birth transaction for the token, and no launch protocol has an on-chain record of it either: it was deployed directly, or by a factory this registry does not know. With an explorer key configured, older tokens are traced on demand.'],
 };
 
@@ -43,6 +44,8 @@ export class Lookup {
     // return: do not ask again on every lookup
     this.birthMiss = new TtlCache(30 * 60_000, 5000);
     this.factsMiss = new TtlCache(10 * 60_000, 5000);
+    // live B20 controls (roles, transfer policies, mint headroom): they can change at any time, so short
+    this.b20Cache = new TtlCache(120_000, 5000);
     const db = store.db;
     this.sql = {
       // first sighting over all time (index-only MIN), activity over the stats window
@@ -351,8 +354,8 @@ export class Lookup {
     const allocations = (p.allocations ?? []).map((a) => {
       const sch = p.schedules?.[a.scheduleId] ?? null;
       // DopplerERC20V1 allows a duration of 0 or at least a day; anything faster is as good as unlocked
-      const unlocked = sch ? sch.cliff < 3600 && sch.duration < 86400 : false;
-      return { to: a.to, amount: a.amount, pct: pct(a.amount), cliffDays: sch ? Math.round((sch.cliff / 86400) * 10) / 10 : null, vestDays: sch ? Math.round((sch.duration / 86400) * 10) / 10 : null, unlockedAtLaunch: unlocked };
+      const unlocked = a.unlocked ?? (sch ? sch.cliff < 3600 && sch.duration < 86400 : false);
+      return { to: a.to, amount: a.amount, via: a.via ?? 'vesting-event', pct: pct(a.amount), cliffDays: sch ? Math.round((sch.cliff / 86400) * 10) / 10 : null, vestDays: sch ? Math.round((sch.duration / 86400) * 10) / 10 : null, unlockedAtLaunch: unlocked };
     });
     const allocated = allocations.reduce((s, a) => s + BigInt(a.amount), 0n);
     const escrowed = BigInt(p.escrowed ?? '0');
@@ -374,7 +377,8 @@ export class Lookup {
    * Returns the updated row, or the same row when nothing could be added.
    */
   async #completeBirthFacts(chain, row) {
-    if (!this.#needsBirthFacts(row)) return row;
+    const allocOnly = !this.#needsBirthFacts(row) && this.#needsAllocFacts(chain.id, row);
+    if (!this.#needsBirthFacts(row) && !allocOnly) return row;
     const rpc = this.rpcs.get(chain.id);
     const reg = this.registries.get(chain.id);
     if (!rpc) return row;
@@ -385,9 +389,12 @@ export class Lookup {
       const receipt = rc?.result;
       if (!receipt) { this.factsMiss.set(key, true); return row; }
       const sender = receipt.from ? receipt.from.toLowerCase() : null;
-      const premint = premintFacts(receipt, row.address);
-      this.store.q.setBirthFacts.run(sender, premint ? JSON.stringify(premint) : '{}', chain.id, row.address);
-      let next = { ...row, tx_from: sender, premint: premint ? JSON.stringify(premint) : '{}' };
+      const registryLaunch = row.factory && reg.factoryOf.has(row.factory) && !row.platform;
+      const premint = premintFacts(receipt, row.address) ?? (registryLaunch ? birthAllocations(receipt, row.address, reg) : null);
+      const stored = premint ? JSON.stringify(premint) : '{"v":2}';
+      this.store.q.setBirthFacts.run(sender, stored, chain.id, row.address);
+      let next = { ...row, tx_from: sender, premint: stored };
+      if (allocOnly) return next;
       // a protocol launch that claims an app with rules: judge the claim now (sender wallet + allocation policy)
       const spec = row.platform && row.factory ? (reg.platformSpecs ?? []).find((s) => s.factory === row.factory) : null;
       const known = spec?.platform.known.get(row.platform);
@@ -406,6 +413,95 @@ export class Lookup {
   /** An update-13 row with a birth transaction whose receipt was never read for sender and pre-mint. */
   #needsBirthFacts(row) {
     return Boolean(row.birth_tx) && row.premint === null && row.tx_from === null;
+  }
+
+  /**
+   * A registry launch (not a protocol one) whose birth was read before allocations minted at birth
+   * were counted (update-18), e.g. an o1 token indexed as unlisted and re-attributed from evidence.
+   */
+  #needsAllocFacts(chainId, row) {
+    const reg = this.registries.get(chainId);
+    if (!reg || !row.birth_tx || !row.factory || row.platform || !reg.factoryOf.has(row.factory)) return false;
+    if ((reg.platformSpecs ?? []).some((s) => s.factory === row.factory)) return false;
+    return !String(row.premint ?? '').includes('"v":2');
+  }
+
+  /** The row passed to #shape, with live B20 controls for a B20 token. */
+  async #shaped(chain, row, opts) {
+    if (chain.b20 && isB20(row.address, row.code_size)) row = { ...row, _b20: await this.#b20Controls(chain, row) };
+    return this.#shape(chain, row, opts);
+  }
+
+  /**
+   * Who can still change a B20 token, read live (2 calls, cached 2 min): the mint headroom (supply
+   * cap vs supply), the transfer policies attached to it and whether an ordinary wallet may send or
+   * receive under them, and which of the accounts that were granted roles at birth (plus the
+   * deployer and the contract it called) still hold admin, mint, seize or pause.
+   */
+  async #b20Controls(chain, row) {
+    const key = `${chain.id}:${row.address}`;
+    const hit = this.b20Cache.get(key);
+    if (hit !== undefined) return hit;
+    const rpc = this.rpcs.get(chain.id);
+    if (!rpc) return null;
+    const t = row.address;
+    const ORDINARY = '0x00000000000000000000000000000000000b2020'; // an address no policy lists
+    try {
+      const first = [
+        { method: 'eth_call', params: [{ to: t, data: '0x8f770ad0' }, 'latest'] }, // supplyCap()
+        { method: 'eth_call', params: [{ to: t, data: '0x18160ddd' }, 'latest'] }, // totalSupply()
+        ...Object.values(B20_POLICY_SCOPES).map((sc) => ({ method: 'eth_call', params: [{ to: t, data: '0xdb3de624' + sc.slice(2) }, 'latest'] })), // policyId(scope)
+        ...(row.birth_tx ? [{ method: 'eth_getTransactionReceipt', params: [row.birth_tx] }] : []),
+      ];
+      const r1 = await rpc.batch(first, { priority: true });
+      const big = (x) => { try { return x?.result && x.result !== '0x' ? BigInt(x.result) : null; } catch { return null; } };
+      const cap = big(r1[0]), supply = big(r1[1]);
+      const scopes = Object.keys(B20_POLICY_SCOPES);
+      const policies = Object.fromEntries(scopes.map((k, i) => [k, big(r1[2 + i])?.toString() ?? null]));
+      const receipt = row.birth_tx ? r1[5]?.result : null;
+      const accounts = new Set([row.tx_from, receipt?.from, receipt?.to, row.factory].filter(Boolean).map((a) => a.toLowerCase()));
+      for (const l of receipt?.logs ?? []) {
+        if (l.address?.toLowerCase() === t && l.topics?.[0]?.toLowerCase() === ROLE_GRANTED_TOPIC && l.topics[2]) accounts.add('0x' + l.topics[2].slice(26).toLowerCase());
+      }
+      for (const a of [...accounts]) if (a === chain.b20.factory || /^0x0{40}$/.test(a)) accounts.delete(a);
+      const cand = [...accounts].slice(0, 6);
+      const roleCalls = cand.flatMap((a) => Object.values(B20_ROLES).map((role) => ({ method: 'eth_call', params: [{ to: t, data: '0x91d14854' + role.slice(2) + pad32(a).slice(2) }, 'latest'] })));
+      const isAuth = (pid, who) => ({ method: 'eth_call', params: [{ to: B20_POLICY_REGISTRY, data: '0x55a1179e' + BigInt(pid).toString(16).padStart(64, '0') + pad32(who).slice(2) }, 'latest'] });
+      const policyCalls = ['sender', 'receiver'].filter((k) => policies[k] && policies[k] !== '0').map((k) => isAuth(policies[k], ORDINARY));
+      const r2 = roleCalls.length + policyCalls.length ? await rpc.batch([...roleCalls, ...policyCalls], { priority: true }) : [];
+      const roles = Object.fromEntries(Object.keys(B20_ROLES).map((k) => [k, []]));
+      const roleNames = Object.keys(B20_ROLES);
+      cand.forEach((a, i) => roleNames.forEach((k, j) => { if (big(r2[i * roleNames.length + j]) === 1n) roles[k].push(a); }));
+      const verdicts = r2.slice(roleCalls.length);
+      const ordinary = {};
+      ['sender', 'receiver'].filter((k) => policies[k] && policies[k] !== '0').forEach((k, i) => { const v = big(verdicts[i]); ordinary[k] = v === null ? null : v === 1n; });
+      const out = {
+        supplyCap: cap?.toString() ?? null, totalSupply: supply?.toString() ?? null,
+        mintable: cap !== null && supply !== null ? cap > supply : null, unlimitedCap: cap !== null && cap >= (1n << 128n) - 1n,
+        policies, ordinaryCanSend: ordinary.sender ?? (policies.sender === '0' ? true : null), ordinaryCanReceive: ordinary.receiver ?? (policies.receiver === '0' ? true : null),
+        roles, accountsChecked: cand,
+        creator: receipt?.to?.toLowerCase() === chain.b20.factory ? 'direct' : receipt?.to ? receipt.to.toLowerCase() : null,
+      };
+      return this.b20Cache.set(key, out);
+    } catch { return null; }
+  }
+
+  /** The birth of a B20 token the index does not hold: the precompile's B20Created log names it. */
+  async #b20Birth(chain, addr) {
+    const rpc = this.rpcs.get(chain.id);
+    const key = `${chain.id}:${addr}`;
+    if (!rpc || this.birthMiss.get(key)) return null;
+    try {
+      const logs = await rpc.call('eth_getLogs', [{ address: chain.b20.factory, topics: [B20_CREATED_TOPIC, pad32(addr)], fromBlock: '0x' + chain.b20.fromBlock.toString(16), toBlock: 'latest' }], { priority: true });
+      const l = logs?.[0];
+      if (l) {
+        const recorder = new BirthRecorder({ chain, rpc, registry: this.registries.get(chain.id), store: this.store });
+        const saved = await recorder.record(addr, Number(l.blockNumber), l.transactionHash, 'registry-event', null, { priority: true });
+        if (saved && saved.fp_kind !== 'empty') return saved;
+      }
+    } catch (e) { console.warn(`[${chain.slug}] B20 birth lookup for ${addr} failed: ${e?.message ?? e}`); }
+    this.birthMiss.set(key, true);
+    return null;
   }
 
   #templateOwner(reg, fpKey) {
@@ -454,6 +550,9 @@ export class Lookup {
       const top = cluster.launchpads[0];
       if (top?.id && top.share >= 0.9 && top.tokens >= 5 && !cluster.template?.sharedByApps) { code = 'bytecode-cluster'; likely = { id: top.id, name: top.name, share: top.share, tokens: top.tokens }; }
     }
+    // a B20 token no launchpad claims: the precompile created it, whoever called it
+    const b20 = row._b20 ?? null;
+    if (b20 && !lp && ['discovered', 'discovered-first', 'discovered-silent', 'silent-factory', 'none', 'evidence-pruned', 'bytecode-cluster'].includes(code)) code = 'b20-unlisted';
     let [headline, detail] = VERDICTS[code] ?? VERDICTS.none;
     if (code === 'look-alike-platform' && claimed) headline = `Claims ${claimed.name}, not launched by it`;
     const warnings = [];
@@ -480,6 +579,18 @@ export class Lookup {
           ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets, and what was minted at birth could not be read; the label is kept but not confirmed.`
           : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);
     }
+    if (b20) {
+      const who = (xs) => (xs.length === 1 ? xs[0] : `${xs.length} accounts`);
+      if (b20.ordinaryCanSend === false) warnings.unshift(`Selling is blocked for ordinary holders: the token's transfer-sender policy (id ${b20.policies.sender}) does not authorize them. Buys can go through while sells revert.`);
+      if (b20.ordinaryCanReceive === false) warnings.unshift(`Receiving is restricted: the transfer-receiver policy (id ${b20.policies.receiver}) does not authorize an ordinary wallet.`);
+      const attached = Object.entries(b20.policies ?? {}).filter(([, v]) => v && v !== '0');
+      if (attached.length && b20.ordinaryCanSend !== false && b20.ordinaryCanReceive !== false) warnings.push(`A transfer policy is attached (${attached.map(([k, v]) => `${k} ${v}`).join(', ')}); whoever administers it can change who may sell, at any time.`);
+      if (b20.roles?.admin?.length) warnings.push(`The admin role is still held by ${who(b20.roles.admin)}: it can attach a transfer policy that blocks selling, at any time.`);
+      const units = (x) => { try { const d = 10n ** BigInt(row.decimals ?? 18); return (BigInt(x) / d).toLocaleString('en-US'); } catch { return String(x); } };
+      if (b20.roles?.mint?.length && b20.mintable) warnings.push(`${who(b20.roles.mint)} can still mint ${b20.unlimitedCap ? 'without a meaningful cap' : `up to the supply cap (minted ${units(b20.totalSupply)} of ${units(b20.supplyCap)})`}.`);
+      if (b20.roles?.seize?.length) warnings.push(`${who(b20.roles.seize)} can move tokens out of any wallet (seize role).`);
+      if (b20.roles?.pause?.length) warnings.push(`${who(b20.roles.pause)} can pause transfers.`);
+    }
     const factoryAddr = row.factory ?? silentMaker?.address ?? (code === 'discovered' || code === 'discovered-first' ? primary?.emitter : null) ?? null;
     const fstats = factoryAddr ? this.#emitterInfo(chain.id, factoryAddr) : null;
     const head = this.#head(chain.id);
@@ -494,6 +605,8 @@ export class Lookup {
         // other token contracts carrying this exact name and symbol (a counterfeit signal, not proof)
         sameNameElsewhere: row.name && row.symbol ? this.store.q.sameName.get(chain.id, row.name, row.symbol, row.address).n : 0 },
       verdict: { code, headline, detail, warnings },
+      // Base-native B20 token: live controls (who can mint, block transfers, seize, pause)
+      b20,
       launchpad: lp ? { id: lp.id, name: lp.name, url: lp.url ?? null, stack: lp.stack ?? null } : null,
       likelyLaunchpad: likely,
       factory: factoryAddr ? {
@@ -544,7 +657,10 @@ export class Lookup {
     if (row) {
       // rows a lookup completes with RPC calls (see token()) go through the rate limiter like unknown tokens
       const live = !row.launchpad_id && (row.confidence === 'none' || row.confidence === 'discovered');
-      return !(live || (this.#needsBirthFacts(row) && !this.factsMiss.get(`${Number(chainId)}:${a}`)));
+      const key = `${Number(chainId)}:${a}`;
+      const facts = (this.#needsBirthFacts(row) || this.#needsAllocFacts(Number(chainId), row)) && !this.factsMiss.get(key);
+      const b20 = Boolean(this.chains.get(Number(chainId))?.b20) && isB20(a, row.code_size) && this.b20Cache.get(key) === undefined;
+      return !(live || facts || b20);
     }
     return this.adhocCache.get(`${Number(chainId)}:${a}`) !== undefined;
   }
@@ -562,11 +678,11 @@ export class Lookup {
         if (live.launchpad_id) {
           // a protocol launch the index holds without its creation event: find and record the real birth
           const born = await this.#protocolBirth(chain, addr, row.birth_tx ? [[row.birth_tx, row.birth_block]] : []);
-          return { status: 200, body: this.#shape(chain, born ?? { ...row, ...live }) };
+          return { status: 200, body: await this.#shaped(chain, born ?? { ...row, ...live }) };
         }
       }
       row = await this.#completeBirthFacts(chain, row);
-      return { status: 200, body: this.#shape(chain, row) };
+      return { status: 200, body: await this.#shaped(chain, row) };
     }
 
     const key = `${chain.id}:${addr}`;
@@ -584,7 +700,12 @@ export class Lookup {
     if (creation) {
       const recorder = new BirthRecorder({ chain, rpc, registry: this.registries.get(chain.id), store: this.store });
       const saved = await recorder.record(addr, null, creation.txHash, 'explorer', null, { priority: true });
-      if (saved && saved.fp_kind !== 'empty') return { status: 200, body: this.#shape(chain, saved) };
+      if (saved && saved.fp_kind !== 'empty') return { status: 200, body: await this.#shaped(chain, saved) };
+    }
+    // A B20 token's creation is a log of the B20 precompile, indexed by the token: one call finds it
+    if (chain.b20 && /^0xb20{14}/.test(addr)) {
+      const born = await this.#b20Birth(chain, addr);
+      if (born) return { status: 200, body: await this.#shaped(chain, born) };
     }
     const { fp, meta } = await enrichToken(rpc, chain, addr, null, { priority: true });
     if (fp.kind === 'empty') return { status: 404, body: { error: 'not_a_contract', message: `No contract at ${addr} on ${chain.name}.` } };
@@ -597,10 +718,10 @@ export class Lookup {
       // index started, or in a stall gap not replayed yet). Its claim and pre-mint need the birth
       // receipt, exactly like an indexed launch: the integrator field alone is not believed.
       const born = await this.#protocolBirth(chain, addr);
-      if (born) return { status: 200, body: this.#shape(chain, born) };
+      if (born) return { status: 200, body: await this.#shaped(chain, born) };
     }
     Object.assign(row, live);
-    return { status: 200, body: this.#shape(chain, row, { adhoc: true }) };
+    return { status: 200, body: await this.#shaped(chain, row, { adhoc: true }) };
   }
 
   /** opts: { limit, attributed: false = only tokens with no known launchpad } */

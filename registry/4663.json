@@ -1,6 +1,6 @@
 {
   "chainId": 4663,
-  "updated": "2026-10-27",
+  "updated": "2026-10-28",
   "notes": "An emitter belongs here only when the launchpad itself or a reputable integration doc publishes it (status 'confirmed'), or when we found it on-chain and say so (status 'observed'). Several launchpads share one event signature (Pons v1 / NoxaFun, Flap / RealFun), so the emitter allowlist, not the topic, decides attribution. Anything else with a matching topic is reported as unverified. URLs are only filled in where we verified them; a wrong link in a provenance tool is a phishing risk.",
   "launchpads": [
     {
@@ -516,6 +516,204 @@
       "stack": "Launches through the Doppler protocol (Airlock). Identified on-chain by its integrator address; not published by Bankr.",
       "events": [],
       "contracts": []
+    },
+    {
+      "id": "o1",
+      "name": "o1 Launchpad",
+      "url": "https://launch.o1.exchange",
+      "stack": "Uniswap v4 pool from launch, permanently locked, fixed-supply ERC-20. Legacy suites (block v1/v2, timestamp v3, stock v4) carried vesting vaults; the current Standard factory does not.",
+      "events": [
+        {
+          "topic0": "0x207384e895174175cc774fe7f7457b37c382f27ebf53d37d5257b862f80eaf9c",
+          "signature": "(unnamed o1 launch: token, poolId, creator indexed; data: 0, supply, fee bps)",
+          "token": {
+            "from": "topic",
+            "index": 1
+          },
+          "fields": {
+            "poolId": {
+              "from": "topic",
+              "index": 2
+            },
+            "creator": {
+              "from": "topic",
+              "index": 3
+            }
+          },
+          "emitters": [
+            {
+              "address": "0x8b40fc20c405d47d725c9723d056a1c6f62bbccf",
+              "label": "Legacy block v1 factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0x76f0923ac4df0a079a10f628a7bce6426ccd344a",
+              "label": "Legacy block v2 factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0x411f21283d3e492bc395027329e08f9f4f560ba5",
+              "label": "Timestamp v3 factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0xe64ac4113848bbc1a6dde1a6d1da96720a36f297",
+              "label": "Managed stock v4 factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0xce9c48cfa068947f77738c81be406b53338e5b0d",
+              "label": "Standard factory (current)",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0x29cad997f3cf1aa9ca51e12be29c09e3e00f119a",
+              "label": "Tax v2 factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0xac7bd3254d7182a32ae3ce7fcd0ab86c88fcd91f",
+              "label": "$O (wstO) factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            },
+            {
+              "address": "0xff6ff1dfa6938707db8dd78d7e74999e8177126f",
+              "label": "Launchpad-of-launchpads child factory",
+              "status": "confirmed",
+              "source": "docs.o1.exchange/launchpad/reference/production-contracts.md (o1's own production contract list), read 2026-10-28; on-chain 2026-10-28: every o1 suite factory emits this launch event (topics: token, Uniswap v4 pool id, creator)"
+            }
+          ]
+        }
+      ],
+      "contracts": [
+        {
+          "address": "0xe960e6c80c74cfdf03c91e7af4e1f5f53f096a44",
+          "label": "block v1 hook"
+        },
+        {
+          "address": "0x9e70276922acc214c468ad4699ea73206b8ba286",
+          "label": "block v1 vesting vault"
+        },
+        {
+          "address": "0x6ba99e83ec4925d55a32ca48c693f04d02c16758",
+          "label": "block v1 announcement registry"
+        },
+        {
+          "address": "0xca4b035a5dbfa2a00fc5dcb08fd1c5a22d0eaa44",
+          "label": "block v2 hook"
+        },
+        {
+          "address": "0x121962ebf01a2e7e8f0e81792e90b8f222d29016",
+          "label": "block v2 vesting vault"
+        },
+        {
+          "address": "0xf28620d32db0856d60c3f95536fca36d0b35fcf0",
+          "label": "block v2 announcement registry"
+        },
+        {
+          "address": "0x441f773b3bb1ed4c6457d0528624112e43c02acc",
+          "label": "timestamp v3 hook"
+        },
+        {
+          "address": "0x6bdaae32f36da5896533fdad5b7a72a2541063be",
+          "label": "timestamp v3 vesting vault"
+        },
+        {
+          "address": "0x163f3a09278918bddaf74cf2a4178f6369a9a3c1",
+          "label": "timestamp v3 announcement registry"
+        },
+        {
+          "address": "0x778b0c4eea7d35d66513b587ba87fc9084b0eacc",
+          "label": "stock v4 hook"
+        },
+        {
+          "address": "0xcf9ed8f4145eac9059bcd83227eeb8591fac0a9a",
+          "label": "stock v4 vesting vault"
+        },
+        {
+          "address": "0x6a95911db04219674323aa0137c3377523c0e29f",
+          "label": "stock v4 announcement registry"
+        },
+        {
+          "address": "0x0310cfebe1d7a69f2414f6595bbe9d17c5342acc",
+          "label": "Standard hook (current)"
+        },
+        {
+          "address": "0xc5444b417a04a7e1b9c1e327c7d499803c14e5ef",
+          "label": "Standard fee escrow"
+        },
+        {
+          "address": "0xf86dfdb678d8e5d932100ef479a59fa65a82a5eb",
+          "label": "Standard token deployer"
+        },
+        {
+          "address": "0x19c4c024aca11e4a3d47792c69c80c8f4e596b23",
+          "label": "Standard announcement registry"
+        },
+        {
+          "address": "0xf9804feab2f9b16ede0cd92e5c6e75c5cf64462f",
+          "label": "launch-buy adapter (dev buy)"
+        },
+        {
+          "address": "0xe05521566199a3ba8d8721c0e44e96018eb1eacc",
+          "label": "Tax v2 hook"
+        },
+        {
+          "address": "0x1dede99a17e1c7775541d73b675470ba4bee0318",
+          "label": "Tax v2 fee escrow"
+        },
+        {
+          "address": "0x0598eb4bd64e0da829a4a82efaeae2ee019aec94",
+          "label": "Tax v2 token deployer"
+        },
+        {
+          "address": "0x11f1d9d0c3107bde23124e39d3935bc8d4f904d4",
+          "label": "Tax v2 announcement registry"
+        },
+        {
+          "address": "0x96268d6832bf2c552bb30c5fd6ea92228d816acc",
+          "label": "$O hook"
+        },
+        {
+          "address": "0x37d2d622df1f446d2a98ec446814c787ef6bd224",
+          "label": "$O token deployer"
+        },
+        {
+          "address": "0x102c2455da81e8c040a8b196e6038ff7eaf66b9d",
+          "label": "$O announcement registry"
+        },
+        {
+          "address": "0xa72db329ad404afc85e07dfbf125be9f977f2acc",
+          "label": "child Tax hook"
+        },
+        {
+          "address": "0x4bf2f5636778ce67c545fd26de46cfe5402d0152",
+          "label": "child fee escrow"
+        },
+        {
+          "address": "0xc0f6125755c140f54cf346d1915164f0efafb462",
+          "label": "child token deployer"
+        },
+        {
+          "address": "0x2b92658a146ba63072b46da51d682b3b8379c9cd",
+          "label": "child announcement registry"
+        },
+        {
+          "address": "0x1caa1962428382106eb3f29b9719bdf797621c90",
+          "label": "platform treasury (fees)"
+        },
+        {
+          "address": "0x5519a8cc7211f483e19ff8d50a3b0c892701044d",
+          "label": "owner / creator admin"
+        }
+      ]
     }
   ],
   "quoteIssuers": [

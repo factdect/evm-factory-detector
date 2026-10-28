@@ -16,7 +16,7 @@
   const ago = (s) => (s == null ? null : s < 90 ? `${s} seconds ago` : s < 5400 ? `${Math.round(s / 60)} minutes ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`);
   // Only a verified/observed launchpad is 'ok' (teal). Everything unproven is 'warn' (amber);
   // a look-alike event is 'bad' (red). A bare direct deploy is never neutral.
-  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', 'look-alike-platform': 'bad', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'evidence-pruned': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
+  const TONE = { verified: 'ok', 'observed-emitter': 'ok', 'observed-platform': 'ok', 'protocol-verified': 'warn', 'code-match': 'warn', 'unverified-emitter': 'bad', 'look-alike-platform': 'bad', 'b20-unlisted': 'warn', discovered: 'warn', 'discovered-first': 'warn', 'discovered-silent': 'warn', 'evidence-pruned': 'warn', 'silent-factory': 'warn', 'bytecode-cluster': 'warn', none: 'warn' };
   const ROLE = { registry: ['Listed factory', 'ok'], companion: ['Listed contract', 'ok'], 'look-alike': ['Look-alike event', 'bad'], unlisted: ['Not in registry', 'warn'], helper: ['Per-launch contract', 'flat'], hook: ['Pool hook', 'flat'], infra: ['Shared plumbing', 'flat'] };
 
   let chains = [];
@@ -84,9 +84,18 @@
     field(dl, 'Token', hexLink(t.address), { note: [[t.name, t.symbol ? `(${t.symbol})` : null].filter(Boolean).join(' ') || 'No ERC-20 name', t.sameNameElsewhere ? `the same name and symbol is on ${plural(t.sameNameElsewhere, 'other token contract', 'other token contracts')}: check you have the right one` : null].filter(Boolean).join('. ') });
     if (d.birth) field(dl, 'Created in', hexLink(d.birth.tx, 'tx'), { note: `block ${num(d.birth.block)}${d.birth.sender ? `, sent by ${short(d.birth.sender)}` : ''}` });
     if (d.premint && d.premint.totalPct != null) {
-      const parts = d.premint.allocations.map((a) => `${a.pct}% → ${short(a.to)}${a.unlockedAtLaunch ? ' (unlocked at launch)' : a.vestDays != null ? ` (vesting ${a.cliffDays ? `${a.cliffDays}-day cliff, ` : ''}${a.vestDays} days)` : ''}`);
+      const parts = d.premint.allocations.map((a) => `${a.pct}% → ${short(a.to)}${a.unlockedAtLaunch ? ' (unlocked at launch)' : a.via === 'vault' ? ' (vesting vault)' : a.vestDays != null ? ` (vesting ${a.cliffDays ? `${a.cliffDays}-day cliff, ` : ''}${a.vestDays} days)` : ''}`);
       if (d.premint.unannouncedPct) parts.push(`${d.premint.unannouncedPct}% held by the token contract, no beneficiary or schedule announced`);
       field(dl, 'Pre-minted', `${d.premint.totalPct}% of supply`, { note: `Minted outside the sale at birth. ${parts.join('; ')}` });
+    }
+    if (d.b20) {
+      const r = d.b20.roles ?? {};
+      const held = ['admin', 'mint', 'seize', 'pause'].filter((k) => r[k]?.length).map((k) => `${k}: ${r[k].map(short).join(', ')}`);
+      const pol = Object.entries(d.b20.policies ?? {}).filter(([, v]) => v && v !== '0').map(([k, v]) => `${k} policy ${v}`);
+      field(dl, 'B20 controls', held.length || pol.length ? 'Still controlled' : 'Renounced', {
+        note: [held.join('; '), pol.join(', '), d.b20.ordinaryCanSend === false ? 'ordinary holders cannot sell' : null,
+          d.b20.creator === 'direct' ? 'created directly through the B20 precompile' : d.b20.creator ? `created by ${short(d.b20.creator)}` : null].filter(Boolean).join('. ') || 'No account holds admin, mint, seize or pause; no transfer policy attached.',
+      });
     }
     const b = d.bytecode;
     const pattern = b.kind === 'minimal-proxy' ? `${b.size}-byte clone of ${short(b.implementation)}` : `${num(b.size)}-byte ${b.kind === 'eip1967-proxy' ? 'upgradeable proxy' : 'contract'}`;

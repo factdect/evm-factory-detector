@@ -55,7 +55,30 @@ export const INFRA_ADDRESSES = new Map([
   ['0x4e59b44847b379578588920ca78fbf26c0b4956c', 'CREATE2 deployer'],
   ['0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789', 'ERC-4337 EntryPoint v0.6'],
   ['0x0000000071727de22e5e9d8baf0edac6f37da032', 'ERC-4337 EntryPoint v0.7'],
+  // Base's native token standard: every B20 token is created by this precompile, whoever launched it
+  ['0xb20f000000000000000000000000000000000000', 'B20 token factory (Base precompile)'],
+  ['0x8453000000000000000000000000000000000001', 'B20 activation registry (Base)'],
+  ['0x8453000000000000000000000000000000000002', 'B20 policy registry (Base)'],
 ]);
+
+// ---- B20 (Base native tokens) -------------------------------------------------------------
+export const B20_FACTORY = '0xb20f000000000000000000000000000000000000';
+export const B20_POLICY_REGISTRY = '0x8453000000000000000000000000000000000002';
+export const B20_CREATED_TOPIC = '0xfd9bf2730513a1709722ff379a0844dfd8f997d600693c2bcc659e188bbdba0d';
+export const ROLE_GRANTED_TOPIC = '0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d';
+export const B20_ROLES = {
+  admin: '0x' + '0'.repeat(64),
+  mint: '0x154c00819833dac601ee5ddded6fda79d9d8b506b911b3dbd54cdb95fe6c3686',
+  seize: '0x3469b8b0d89e9604f8510ed143f74a8336d22955d4f83e23bf53d9414e27f432',
+  pause: '0x139c2898040ef16910dc9f44dc697df79363da767d8bc92f2e310312b816e46d',
+};
+export const B20_POLICY_SCOPES = {
+  sender: '0xb81736c875ab819dd97f59f2a6542cfb731ad52b4ae15a6f24df2fb02b0327f5',
+  receiver: '0x8a4b3fa2d8b921852bc0089c6ef0958aa6961897be36fd731330fe2cd23f8363',
+  executor: '0x10be5173aff2a44e748bd9acd8b19fe34689581398a9db7ba2fb671e786ff7d8',
+};
+/** A B20 token: Base-native, address in the factory's 0xb2 range, runtime code the one-byte 0xef marker. */
+export const isB20 = (address, codeSize) => /^0xb20{14}/i.test(address ?? '') && (codeSize == null || codeSize === 1);
 export const INFRA_TOPICS = new Map(
   Object.entries(INFRA_SIGNATURES).map(([sig, label]) => [toEventSelector(sig), label]),
 );
@@ -173,7 +196,7 @@ export function storedPremint(premintText, txFrom) {
   if (premintText === null || premintText === undefined) return txFrom ? null : undefined;
   try {
     const p = JSON.parse(premintText);
-    return p && (p.allocations?.length || (p.escrowed && BigInt(p.escrowed) > 0n)) ? p : null;
+    return p && (p.allocations?.length || (p.escrowed && BigInt(p.escrowed) > 0n)) ? p : null; // {} and { v: 2 }: read, nothing
   } catch { return undefined; }
 }
 
@@ -344,6 +367,29 @@ export function premintFacts(receipt, token) {
   }
   if (!allocations.length && escrowed === 0n) return null;
   return { escrowed: escrowed.toString(), schedules, allocations };
+}
+
+/**
+ * Supply minted at birth to anyone but the launch itself: what a launchpad allocated outside the
+ * sale (o1's factories before 2026-08-30 minted up to 80% to any address). Mints to the token, to
+ * the launchpad's own contracts (hooks, lockers, factories) and to shared plumbing are the launch;
+ * a mint to one of the launchpad's vesting vaults is a vested allocation; anything else is an
+ * allocation unlocked at launch. Returns the premint shape ({ v: 2, escrowed, schedules,
+ * allocations }), or { v: 2 } when the birth minted nothing outside the launch.
+ */
+export function birthAllocations(receipt, token, registry) {
+  const t = lc(token);
+  const allocations = [];
+  for (const l of receipt?.logs ?? []) {
+    if (lc(l.address) !== t || lc(l.topics?.[0]) !== TRANSFER_TOPIC || l.topics.length !== 3 || lc(l.topics[1]) !== ZERO_TOPIC) continue;
+    const to = '0x' + lc(l.topics[2]).slice(26);
+    if (to === t || to === '0x000000000000000000000000000000000000dead' || INFRA_ADDRESSES.has(to) || registry?.factoryOf?.has(to)) continue;
+    const companion = registry?.companionOf?.get(to);
+    const vault = Boolean(companion && /vesting|vault/i.test(companion.label ?? ''));
+    if (companion && !vault) continue; // a hook, locker or deployer of the launchpad: the launch itself
+    allocations.push({ to, scheduleId: null, amount: BigInt('0x' + ((l.data ?? '0x').slice(2, 66) || '0')).toString(), unlocked: !vault, via: vault ? 'vault' : 'mint' });
+  }
+  return allocations.length ? { v: 2, escrowed: '0', schedules: {}, allocations } : { v: 2 };
 }
 
 export function platformCall(match, token) {
