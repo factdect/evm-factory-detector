@@ -26,19 +26,23 @@ export async function beaconOf(rpc, token) {
  * getLogs, a few dozen calls on Robinhood Chain); after that it is one call per cycle.
  * maxCalls bounds how much a single cycle may spend so the indexer is never starved.
  */
+// A span a node refused for this scan, per chain. Private to it: shrinking `chain.addrLogsSpan` would
+// also shorten the birth scan of every lookup.
+const issuerSpan = new Map();
+
 export async function scanIssuers({ chain, rpc, registry, store, head, maxCalls = 4 }) {
   let calls = 0, found = 0;
   const to = head - CONFIRMATIONS;
   for (const issuer of registry.quoteIssuers ?? []) {
     let next = store.q.getIssuerCursor.get(chain.id, issuer.factory)?.next_block ?? 0;
-    const span = Math.max(1, chain.addrLogsSpan ?? chain.logsChunk);
+    const span = Math.max(1, Math.min(chain.addrLogsSpan ?? chain.logsChunk, issuerSpan.get(chain.id) ?? Infinity));
     while (next <= to && calls < maxCalls) {
       const b = Math.min(next + span - 1, to);
       let logs;
       try {
         logs = await rpc.call('eth_getLogs', [{ address: issuer.factory, topics: [issuer.topic0], fromBlock: hex(next), toBlock: hex(b) }]);
       } catch (e) {
-        if (e instanceof RpcError && span > 1000) { chain.addrLogsSpan = Math.floor(span / 4); break; } // node refused the span: shrink and retry next cycle
+        if (e instanceof RpcError && span > 1000) { issuerSpan.set(chain.id, Math.floor(span / 4)); break; } // node refused the span: shrink (for this scan only) and retry next cycle
         throw e;
       }
       calls++;

@@ -5,6 +5,12 @@
 
 import { hex, isCallerRefusal, rangeCapFrom, RpcError } from './rpc.js';
 
+// A block-range cap a node stated to this probe. Kept here, per chain, so that learning it never
+// shrinks `chain.addrLogsSpan`, which other features (the birth scan of a lookup) size their work by.
+const learnedCap = new Map();
+/** The span this probe asks for on a chain: the configured one, or a cap the node stated. */
+export const probeSpan = (chain) => Math.max(1, Math.min(chain.addrLogsSpan, learnedCap.get(chain.id) ?? Infinity));
+
 /**
  * First block in [head - lookback, beforeBlock) where `address` emitted a log, or `beforeBlock`
  * if there is none. Returns { firstLogBlock, lookbackFrom }. A range the node refuses because it
@@ -27,7 +33,7 @@ export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
       if (isCallerRefusal(e)) throw e; // rate limit / quota: retried later; a guess here would be a false "old"
       const cap = rangeCapFrom(e);
       if (cap && cap < b - a + 1) {
-        chain.addrLogsSpan = cap; // learned for the rest of this process
+        learnedCap.set(chain.id, Math.min(cap, learnedCap.get(chain.id) ?? Infinity)); // for the rest of this process
         for (let x = a; x <= b; x += cap) {
           const found = await firstIn(x, Math.min(x + cap - 1, b));
           if (found !== null) return found;
@@ -37,12 +43,14 @@ export async function probeFirstLog(rpc, chain, address, head, beforeBlock) {
       const heavy = e instanceof RpcError || e?.retryable || /HTTP 5\d\d/.test(e?.message ?? '');
       if (!heavy) throw e;
       if (b - a < 50) return a;
+      // (a node's hint of the range it could serve is not used here: for the busiest addresses it
+      // would walk the whole lookback in small pieces, while halving reaches "active at a" in O(log))
       const mid = a + Math.floor((b - a) / 2);
       return (await firstIn(a, mid)) ?? (await firstIn(mid + 1, b));
     }
   };
   for (let a = lookbackFrom; a < beforeBlock; ) {
-    const span = Math.max(1, chain.addrLogsSpan); // re-read: a stated cap shrinks it mid-probe
+    const span = probeSpan(chain); // re-read: a stated cap shrinks it mid-probe
     const b = Math.min(a + span - 1, beforeBlock - 1);
     const found = await firstIn(a, b);
     if (found !== null) return { firstLogBlock: found, lookbackFrom };

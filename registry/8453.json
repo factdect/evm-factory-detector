@@ -206,6 +206,14 @@
           "label": "UniversalRouter"
         }
       ]
+    },
+    {
+      "id": "bankr",
+      "name": "Bankr",
+      "url": "https://bankr.bot",
+      "stack": "Launches through the Doppler protocol (Airlock) from four hot wallets. Identified on-chain by its integrator address; not published by Bankr.",
+      "events": [],
+      "contracts": []
     }
   ]
 }

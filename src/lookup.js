@@ -336,7 +336,7 @@ export class Lookup {
           }
         }
       }
-    } catch { /* a refusing or flaky node: answer from the protocol call alone */ }
+    } catch (e) { console.warn(`[${chain.slug}] birth scan for ${addr} failed: ${e?.message ?? e}`); }
     this.birthMiss.set(key, true);
     return null;
   }

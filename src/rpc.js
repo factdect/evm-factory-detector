@@ -36,14 +36,27 @@ const RANGE_CAP_RES = [
   /block range (?:limit|is limited to|exceeds?(?: the)?(?: max(?:imum)?)?)\D{0,12}([\d,]+)/i,
   /max(?:imum)? (?:block )?range(?: of| is|:)? ([\d,]+)/i,
 ];
-/** Block count a node says it allows per eth_getLogs, or null when the error does not say. */
+// A range refused for the SIZE of its result ("Log response size exceeded", "more than 10000
+// results"). Not a cap on the span: the same span is fine for a quiet address. Alchemy's wording
+// also quotes its 10,000-block policy in this message; reading that as a cap once made the birth
+// scan 10x shorter for the rest of the process.
+export const isResultSizeError = (e) => /response size|too many (results|logs)|more than \d[\d,]* (results|logs)|cap of \d+K? logs|exceeds? (the )?(max(imum)? )?(number of )?(results|logs)/i.test(e?.message ?? '');
+/** Block count a node says it allows per eth_getLogs, or null when the error does not say (or is about result size). */
 export function rangeCapFrom(e) {
   const msg = String(e?.message ?? '');
+  if (isResultSizeError(e)) return null;
   for (const re of RANGE_CAP_RES) {
     const m = msg.match(re);
     if (m) { const n = Number(m[1].replace(/,/g, '')); if (Number.isFinite(n) && n > 0) return n; }
   }
   return null;
+}
+/** The range a node says it could serve ("this block range should work: [0x…, 0x…]", Alchemy), as [from, to], or null. */
+export function suggestedRangeFrom(e) {
+  const m = String(e?.message ?? '').match(/should work: \[\s*(0x[0-9a-f]+)\s*,\s*(0x[0-9a-f]+)\s*\]/i);
+  if (!m) return null;
+  const a = Number(m[1]), b = Number(m[2]);
+  return Number.isFinite(a) && Number.isFinite(b) && b >= a ? [a, b] : null;
 }
 export const isStateUnavailable = (e) =>
   /historical state|missing trie node|state .*not available|pruned|header not found|archive/i.test(e?.message ?? '');
@@ -251,10 +264,14 @@ export async function getLogsRange(rpc, filter, from, to, state, softCap = 9500)
     } catch (e) {
       if (e instanceof RpcError && b > a) {
         const cap = rangeCapFrom(e);
+        const hint = suggestedRangeFrom(e);
         if (cap && cap < b - a + 1) {
           // the node told us its cap: use it from now on instead of growing back into the wall
           state.max = Math.min(state.max, cap);
           state.span = Math.min(state.span, cap);
+        } else if (hint && hint[0] === a && hint[1] < b) {
+          // a result-size refusal that names the range it would serve: take exactly that, once
+          state.span = hint[1] - a + 1;
         } else {
           state.span = Math.max(1, Math.floor((b - a + 1) / 2));
         }

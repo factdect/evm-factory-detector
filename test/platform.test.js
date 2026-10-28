@@ -423,3 +423,19 @@ test('shipped Robinhood registry: no Bankr wallet rule (ZeroDev Kernel is shared
   assert.equal(b.launchpad.id, 'bankr');
   assert.match(b.verdict.warnings.at(-1), /nothing on-chain ties a launch to Bankr/);
 });
+
+test('Base registry: the claimed app has a launchpad entry, so a Base look-alike gets the headline, the warning and the name', async () => {
+  const base = loadRegistry(8453);
+  assert.equal(base.launchpads.get('bankr')?.name, 'Bankr');
+  const store = openDb(':memory:');
+  const chain = { ...chainOf(), id: 8453, slug: 'base', name: 'Base' };
+  const AIRLOCK_BASE = '0x660eaaedebc968f8f3694354fa8ec0b4c5ba8d12';
+  store.saveToken({ chain_id: 8453, address: DRS, confidence: 'look-alike-platform', launchpad_id: 'doppler', factory: AIRLOCK_BASE, event_sig: 'Create(address,address,address,address)', platform: BANKR,
+    birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event', total_supply: SUPPLY, tx_from: LAUNCHER, premint: JSON.stringify(INSTANT_24), claim_app: 'bankr',
+    claim_check: JSON.stringify({ result: 'failed', wallet: 'failed', allocations: 'failed' }), name: 'X', symbol: 'X', decimals: 18 });
+  const lk = new Lookup({ chains: new Map([[8453, chain]]), rpcs: new Map([[8453, { batch: async (cs) => cs.map(() => ({ result: '0x' })) }]]), registries: new Map([[8453, base]]), store });
+  const b = (await lk.token(8453, DRS)).body;
+  assert.equal(b.verdict.headline, 'Claims Bankr, not launched by it');
+  assert.deepEqual(b.factory.platform.claims, { id: 'bankr', name: 'Bankr' });
+  assert.match(b.verdict.warnings.at(-1), /names Bankr, but what was minted at birth/);
+});

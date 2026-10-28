@@ -7,12 +7,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import { loadRegistry } from '../src/attribution.js';
-import { probeFirstLog } from '../src/age.js';
+import { probeFirstLog, probeSpan } from '../src/age.js';
 import { loadChains } from '../src/chains.js';
 import { isDiskFull, openDb } from '../src/db.js';
 import { Indexer } from '../src/indexer.js';
 import { Lookup } from '../src/lookup.js';
-import { getLogsRange, isCallerRefusal, rangeCapFrom, Rpc, RpcError } from '../src/rpc.js';
+import { getLogsRange, isCallerRefusal, rangeCapFrom, Rpc, RpcError, suggestedRangeFrom } from '../src/rpc.js';
 
 const quiet = { info() {}, warn() {}, error() {} };
 const addr = (n) => '0x' + n.toString(16).padStart(40, '0');
@@ -68,7 +68,7 @@ test('Rpc: "request limit reached" (Base, HTTP 200 JSON-RPC error) is a rate lim
 });
 
 test('probeFirstLog: rate limits and quota never date a contract; a stated cap re-asks in smaller pieces', async () => {
-  const chain = { ageLookbackBlocks: 1000, addrLogsSpan: 600 };
+  const chain = { id: 99001, ageLookbackBlocks: 1000, addrLogsSpan: 600 };
   const rpcWith = (fn) => ({ call: async (_m, [f]) => fn(Number(f.fromBlock), Number(f.toBlock)) });
   // Before update-13 a 429 after retries counted as "busy range = activity": a brand-new factory on
   // a rate-limited Base RPC came out "older than the lookback". Now the probe fails and is retried later.
@@ -80,7 +80,8 @@ test('probeFirstLog: rate limits and quota never date a contract; a stated cap r
     return a <= 1450 && 1450 <= b ? [{ blockNumber: '0x' + (1450).toString(16) }] : [];
   });
   assert.deepEqual(await probeFirstLog(capped, chain, '0xabc', 2000, 1900), { firstLogBlock: 1450, lookbackFrom: 1000 });
-  assert.equal(chain.addrLogsSpan, 200, 'learned for the next probe');
+  assert.equal(probeSpan(chain), 200, 'learned for the next probe');
+  assert.equal(chain.addrLogsSpan, 600, 'the configured span is not touched: the birth scan of a lookup sizes its work by it');
   assert.deepEqual(await probeFirstLog(rpcWith((a, b) => { if (b - a + 1 > 200) throw new RpcError('x', { message: 'eth_getLogs is limited to a 200 range' }); return []; }), chain, '0xabc', 2000, 1900),
     { firstLogBlock: 1900, lookbackFrom: 1000 }, 'silent contract stays new');
 });
@@ -424,4 +425,28 @@ test('reclaim: RETAIN_REFS_DAYS never prunes inside the stats window', () => {
   ix.reclaim('housekeeping');
   const left = store.db.prepare('SELECT token FROM birth_refs').all().map((r) => r.token);
   assert.deepEqual(left, [addr(1)], 'the 2-day-old evidence stays; the 5-day-old goes');
+});
+
+test('a result-size refusal is not a range cap: Alchemy names its 10,000-block policy in it, and once took the birth scan from 2.4M to 240k blocks', async () => {
+  const ALCHEMY = 'Log response size exceeded. You can make eth_getLogs requests with up to a 10,000 block range and no limit on the response size, or you can request any block range with a cap of 10K logs in the response. Based on your parameters and the response size limit, this block range should work: [0x3e8, 0x4e2]';
+  assert.equal(rangeCapFrom({ message: ALCHEMY }), null);
+  assert.deepEqual(suggestedRangeFrom({ message: ALCHEMY }), [1000, 1250]);
+  assert.equal(rangeCapFrom({ message: 'query returned more than 10000 results' }), null);
+  assert.equal(rangeCapFrom({ message: 'eth_getLogs is limited to a 200 range' }), 200, 'a real cap still parses');
+  // the age probe on a busy address: a size refusal is activity (halving, as before); the span stays configured
+  const chain = { id: 99002, ageLookbackBlocks: 1000, addrLogsSpan: 100_000 };
+  const asked = [];
+  const rpc = { call: async (_m, [f]) => { const a = Number(f.fromBlock), b = Number(f.toBlock); asked.push([a, b]);
+    if (b - a + 1 > 250) throw new RpcError('eth_getLogs', { message: ALCHEMY.replace('[0x3e8, 0x4e2]', `[0x${a.toString(16)}, 0x${(a + 249).toString(16)}]`) });
+    return a <= 1100 && 1100 <= b ? [{ blockNumber: '0x44c' }] : []; } };
+  assert.deepEqual(await probeFirstLog(rpc, chain, '0xabc', 2000, 1900), { firstLogBlock: 1100, lookbackFrom: 1000 });
+  assert.ok(asked.length <= 8, `halving, not a walk: ${asked.length} calls`);
+  assert.equal(chain.addrLogsSpan, 100_000);
+  assert.equal(probeSpan(chain), 100_000, 'no cap learned from a size error');
+  asked.length = 0;
+  // getLogsRange takes the hint too, without lowering its ceiling
+  const state = { span: 100_000, max: 100_000 };
+  const got = await getLogsRange(rpc, { address: '0xabc' }, 1000, 1899, state);
+  assert.equal(got.length, 1);
+  assert.equal(state.max, 100_000);
 });
