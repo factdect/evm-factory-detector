@@ -88,6 +88,13 @@
       if (d.premint.unannouncedPct) parts.push(`${d.premint.unannouncedPct}% held by the token contract, no beneficiary or schedule announced`);
       field(dl, 'Pre-minted', `${d.premint.totalPct}% of supply`, { note: `Minted outside the sale at birth. ${parts.join('; ')}` });
     }
+    if (d.sellCheck) {
+      const sc = d.sellCheck;
+      const label = sc.verdict === 'sell-reverts' ? 'Sell fails' : sc.verdict === 'untradable' ? 'Cannot buy (no liquidity)' : `Returns ${sc.returnPct < 0.01 ? 'under 0.01' : sc.returnPct}%`;
+      const hook = sc.pool?.hooks && !/^0x0{40}$/.test(sc.pool.hooks) ? ` (hook ${short(sc.pool.hooks)})` : '';
+      const what = sc.verdict === 'ok' ? 'Normal fees only.' : sc.verdict === 'heavy-fees' ? 'High fees or tax.' : sc.verdict === 'untradable' ? 'No pool can fill the buy.' : 'Buyers lose most or all of what they pay.';
+      field(dl, 'Sell test', label, { note: `Simulated buy with 0.0002 ETH, sold straight back, through the Uniswap v4 pool${hook}. ${what}${sc.knownTrap ? ` The hook is a copy of a known trap: ${sc.knownTrap.name}.` : ''}` });
+    }
     if (d.b20) {
       const r = d.b20.roles ?? {};
       const held = ['admin', 'mint', 'seize', 'pause'].filter((k) => r[k]?.length).map((k) => `${k}: ${r[k].map(short).join(', ')}`);

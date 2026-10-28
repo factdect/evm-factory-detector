@@ -31,6 +31,8 @@ const DEFAULTS = {
     // eth_getLogs filtered by one address accepts huge spans here (measured: 2,000,000 blocks)
     addrLogsSpan: 2_000_000,
     explorer: { kind: 'blockscout-pro', chainid: 4663, web: 'https://robinhoodchain.blockscout.com' },
+    // Uniswap v4 (from o1's production list, code checked on-chain 2026-10-28): the sell simulation
+    v4: { poolManager: '0x8366a39cc670b4001a1121b8f6a443a643e40951', quoter: '0x8dc178efb8111bb0973dd9d722ebeff267c98f94', wrappedNative: '0x0bd7d308f8e1639fab988df18a8011f41eacad73' },
   },
   8453: {
     id: 8453,
@@ -48,6 +50,7 @@ const DEFAULTS = {
     ageLookbackBlocks: 86_400,
     // Base-native B20 tokens (Beryl upgrade, 2026-07-08): their creation is a log of this precompile
     b20: { factory: '0xb20f000000000000000000000000000000000000', fromBlock: 48_300_000 },
+    v4: { poolManager: '0x498581ff718922c3f8e6a244956af099b2652b2b', quoter: '0x0d5e0f971ed27fbff6c2837bf31316121532048d', wrappedNative: '0x4200000000000000000000000000000000000006' },
     logsSoftCap: 9500,
     confirmations: 5,
     pollMs: 4000,

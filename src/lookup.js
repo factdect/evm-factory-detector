@@ -4,6 +4,7 @@ import { BirthRecorder } from './births.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { findCreation } from './explorer.js';
 import { getLogsRange, hex } from './rpc.js';
+import { sellCheck } from './sellcheck.js';
 
 // below this much free disk (not counting pages reusable inside the file), writes that grow a file fail soon
 const MIN_FS_FREE_BYTES = 64 * 1024 * 1024;
@@ -46,6 +47,8 @@ export class Lookup {
     this.factsMiss = new TtlCache(10 * 60_000, 5000);
     // live B20 controls (roles, transfer policies, mint headroom): they can change at any time, so short
     this.b20Cache = new TtlCache(120_000, 5000);
+    // simulated buy-and-sell-back through the token's v4 pool (a hook can keep a sell's output)
+    this.sellCache = new TtlCache(120_000, 5000);
     const db = store.db;
     this.sql = {
       // first sighting over all time (index-only MIN), activity over the stats window
@@ -429,7 +432,26 @@ export class Lookup {
   /** The row passed to #shape, with live B20 controls for a B20 token. */
   async #shaped(chain, row, opts) {
     if (chain.b20 && isB20(row.address, row.code_size)) row = { ...row, _b20: await this.#b20Controls(chain, row) };
+    // tokens no known launchpad made: their pool may run a hook nobody has reviewed. Pools are searched
+    // from the birth block, so a token of unknown age (USDC) is not judged by a stranger's fresh pool.
+    if (chain.v4 && !row.launchpad_id && row.birth_block != null) row = { ...row, _sell: await this.#sellTest(chain, row) };
     return this.#shape(chain, row, opts);
+  }
+
+  /** The sell simulation (src/sellcheck.js), cached two minutes per token. Never throws. */
+  async #sellTest(chain, row) {
+    const key = `${chain.id}:${row.address}`;
+    const hit = this.sellCache.get(key);
+    if (hit !== undefined) return hit;
+    const rpc = this.rpcs.get(chain.id);
+    if (!rpc) return null;
+    try {
+      const r = await sellCheck({ chain, rpc, token: row.address, fromBlock: row.birth_block, spanBlocks: Math.round((2 * 86400 * 1000) / chain.blockTimeMs), trapHooks: this.registries.get(chain.id)?.trapHooks });
+      return this.sellCache.set(key, r);
+    } catch (e) {
+      console.warn(`[${chain.slug}] sell test for ${row.address} failed: ${e?.message ?? e}`);
+      return this.sellCache.set(key, null);
+    }
   }
 
   /**
@@ -579,6 +601,19 @@ export class Lookup {
           ? `The launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s known wallets, and what was minted at birth could not be read; the label is kept but not confirmed.`
           : `The integrator field names ${claimed.name}; the launch could not be checked against ${claimed.name}'s wallets or allocation policy.`);
     }
+    const sell = row._sell ?? null;
+    if (sell) {
+      const hook = sell.pool?.hooks && !/^0x0{40}$/.test(sell.pool.hooks) ? ` (hook ${sell.pool.hooks})` : '';
+      const lead = [];
+      if (sell.knownTrap) lead.push(`The token's Uniswap v4 pool runs hook ${sell.knownTrap.hook}, byte-for-byte a copy of a known sell-trap hook (${sell.knownTrap.name}): on these pools the hook keeps what a sale pays out.`);
+      if (sell.verdict === 'sell-reverts') lead.push(`Selling fails: a simulated buy followed by selling it all back reverts in the token's Uniswap v4 pool${hook}. Buyers may not be able to sell.`);
+      else if (sell.verdict === 'trap') lead.push(`A simulated round trip (buy with 0.0002 ETH, sell it straight back) returns only ${sell.returnPct < 0.01 ? 'under 0.01' : sell.returnPct}% through the token's Uniswap v4 pool${hook}${sell.pool?.fee && sell.pool.fee < 0x800000 && sell.pool.fee >= 100_000 ? `, whose own fee is ${sell.pool.fee / 10_000}% per swap` : ''}. Buyers lose about ${Math.round(100 - sell.returnPct)}% of what they pay: a sell tax, a fee trap or a honeypot.`);
+      else if (sell.verdict === 'heavy-fees') warnings.push(`A simulated round trip returns ${sell.returnPct}% through the token's Uniswap v4 pool${hook}: fees and taxes of about ${Math.round(100 - sell.returnPct)}%.`);
+      else if (sell.verdict === 'untradable') warnings.push(`No Uniswap v4 pool of this token can fill a 0.0002 ETH buy right now: it has no liquidity (never added, or pulled), or its hook refuses buys.`);
+      const bad = (sell.verdict === 'ok' || sell.verdict === 'heavy-fees') ? (sell.others ?? []).filter((o) => o.verdict === 'trap' || o.verdict === 'sell-reverts') : [];
+      if (bad.length) warnings.push(`Another Uniswap v4 pool of this token (hook ${bad[0].hooks}${bad[0].fee >= 100_000 && bad[0].fee < 0x800000 ? `, fee ${bad[0].fee / 10_000}%` : ''}) ${bad[0].verdict === 'trap' ? `returns only ${bad[0].returnPct}% of a round trip` : 'cannot be sold into'}. A router picks the main pool; a buy sent to that one is lost.`);
+      warnings.unshift(...lead);
+    }
     if (b20) {
       const who = (xs) => (xs.length === 1 ? xs[0] : `${xs.length} accounts`);
       if (b20.ordinaryCanSend === false) warnings.unshift(`Selling is blocked for ordinary holders: the token's transfer-sender policy (id ${b20.policies.sender}) does not authorize them. Buys can go through while sells revert.`);
@@ -607,6 +642,8 @@ export class Lookup {
       verdict: { code, headline, detail, warnings },
       // Base-native B20 token: live controls (who can mint, block transfers, seize, pause)
       b20,
+      // tokens with no known launchpad: a simulated buy and sell-back through their Uniswap v4 pool
+      sellCheck: sell,
       launchpad: lp ? { id: lp.id, name: lp.name, url: lp.url ?? null, stack: lp.stack ?? null } : null,
       likelyLaunchpad: likely,
       factory: factoryAddr ? {
@@ -660,7 +697,8 @@ export class Lookup {
       const key = `${Number(chainId)}:${a}`;
       const facts = (this.#needsBirthFacts(row) || this.#needsAllocFacts(Number(chainId), row)) && !this.factsMiss.get(key);
       const b20 = Boolean(this.chains.get(Number(chainId))?.b20) && isB20(a, row.code_size) && this.b20Cache.get(key) === undefined;
-      return !(live || facts || b20);
+      const sell = Boolean(this.chains.get(Number(chainId))?.v4) && !row.launchpad_id && row.birth_block != null && this.sellCache.get(key) === undefined;
+      return !(live || facts || b20 || sell);
     }
     return this.adhocCache.get(`${Number(chainId)}:${a}`) !== undefined;
   }

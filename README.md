@@ -62,6 +62,22 @@ o1's factories before 2026-08-30 could mint part of the supply to any address at
 
 B20 is Base's native token standard (Beryl upgrade, 2026-07-08): every B20 token is created by the precompile `0xB20f…0000`, so the "creator" of an o1 token, of a hand-made token and of any other launcher's token is the same address. o1 is recognised by its own launch event, never by that creator; a B20 token no launchpad claims gets the verdict `b20-unlisted`. A B20 token can keep controls an ERC-20 launch cannot: an admin role that can attach a transfer policy at any time, a mint role under a supply cap, a seize role, a pause role, and transfer policies (allowlist / blocklist in the B20 policy registry) that decide who may send or receive. A lookup of a B20 token reads them live (two calls, cached two minutes): supply cap vs supply, the three transfer-policy slots and whether an ordinary wallet is authorized as sender and receiver, and which of the accounts granted roles at birth (plus the deployer and the contract it called) still hold admin, mint, seize or pause. They are returned as `b20` and turned into warnings ("Selling is blocked for ordinary holders", "the admin role is still held by …", "… can still mint up to the supply cap"). A B20 token the index does not hold is found by one address-and-topic-filtered `eth_getLogs` on the precompile (`B20Created`, token indexed).
 
+### Can a buyer sell? The sell test
+
+A token can be clean and its pool still a trap. On Uniswap v4 the pool's hook runs on every swap and can keep what a sale pays out. INVISIBLE on Base (`0xb2000000000000000000006996930ba855ea5774`, 2026-10-28) is a plain B20 token with no tax, no roles and no transfer policy, so a check that reads only the token finds nothing (update-18 called it clean); its pool's hook (`0xbacb63b3…`) kept 99.99% of the ETH of every sale, and a 0.0002 ETH test buy sold straight back returned 0.00000002 ETH. The same 16,817-byte hook was deployed 592 times in the week to 2026-10-28, one per B20 token, each token, hook and pool opened by a fresh wallet; once a few buyers are in, the liquidity is pulled.
+
+For a token no known launchpad made (and whose birth block is known), a lookup now runs the swap. It finds the token's v4 pools against ETH or WETH from the token's Initialize logs (birth block plus two days, address- and topic-filtered `eth_getLogs`), then asks the v4 Quoter, by `eth_call`, for a 0.0002 ETH buy and for the round trip: one two-hop quote, ETH → token → ETH through the same pool, so the sale sees the pool as the buy left it (a thin pool, or a fresh one-sided pool nobody has bought from yet, does not read as a trap). The Quoter executes the pool and its hook for real and reverts with the result, so nothing is sent and nothing is signed. The verdict is that of the pool a router would pick, the one that gives the most tokens for the buy; any other pool is listed in `others`, because anyone can open a pool of any token and a stranger's trap pool beside the real one does not make the token a trap (it gets a note). A token of unknown age is not tested, for the same reason: USDC's newest pools are anyone's.
+
+| `sellCheck.verdict` | Meaning |
+| --- | --- |
+| `ok` | The round trip returns at least 90% (pool fees only) |
+| `heavy-fees` | 50–90% comes back |
+| `trap` | Under 50% comes back: a sell tax in the hook, a pool fee set to tens of percent (one Base pool had 86.56% per swap), or a honeypot |
+| `sell-reverts` | The buy quotes, the sale back reverts |
+| `untradable` | No pool can fill the buy: no liquidity (never added, or pulled), or the hook refuses buys |
+
+`trapHooks` in the registry lists hook templates by the keccak of their runtime code; a pool whose hook matches is named as a copy of a known trap even after its liquidity is gone (one `eth_getCode` batch, only on chains with templates). Base ships the INVISIBLE template. Cost: one head call, two `eth_getLogs` and one batch of two `eth_call` per pool (at most three pools), cached two minutes per token. It runs on Base and Robinhood Chain (`v4` in `src/chains.js`: PoolManager, V4Quoter, wrapped native).
+
 ### Confidence levels
 
 | Code | Meaning |
@@ -100,7 +116,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 
 | Endpoint | Returns |
 | --- | --- |
-| `/api/v1/token/:chainId/:address` | Verdict, launchpad, factory (with tokens announced and first-seen age), birth tx, bytecode template, announcers |
+| `/api/v1/token/:chainId/:address` | Verdict, launchpad, factory (with tokens announced and first-seen age), birth tx, bytecode template, announcers; `premint`, `b20` (B20 controls) and `sellCheck` (the sell test) where they apply |
 | `/api/v1/recent/:chainId?limit=50` | Newest births |
 | `/api/v1/stocks/:chainId` | New quote tokens from known issuers (Robinhood stock tokens). Each row: when it was added, `pairsLaunched` (how many launches use it as their pair), `open` (true = nobody has launched against it yet), and `firstLaunch` (the first token on that pair, its launchpad, and `secondsAfterListing`). A token counts only if its beacon slot matches the issuer's — name-alikes are rejected. |
 | `/api/v1/candidates/:chainId` | The detector: unlisted factories, grouped. Contracts that fire in the same birth transactions are one *system* (`coEmitters`); systems sharing a creation event are one *mechanism* (`mechanism.addresses` > 1 = a factory that rotates its address). `firstActivityAgoSec` is the contract's first log on-chain (dated in idle time by an address-filtered getLogs lookback, default 7 days), not when this index first saw it. `makerShare` = share of its tokens whose deployer called it or whose first mint went to it. Params: `status=unlisted` (default: `new` + `look-alike`) \| `all` \| `pool-hook` \| `dex-plumbing` \| …, `sinceHours=24` (first on-chain activity within N hours; undated systems are counted in `pendingAgeCheck`, never guessed), `min=2`, `limit=100`. Response carries `total` beside the page. |
@@ -110,7 +126,7 @@ All `GET`, JSON, CORS open. The lookup page renders exactly what the token endpo
 
 Page: `/` and shareable `/t/:chainId/:address`.
 
-Indexed tokens cost no RPC call. Tokens outside the index cost one batched RPC request (plus one explorer call when `ETHERSCAN_API_KEY` or `BLOCKSCOUT_API_KEY` is set; Etherscan V2 is tried first), are rate limited per client, and are not written to the database unless the explorer returned a real birth transaction.
+Indexed launchpad tokens cost no RPC call; a token no known launchpad made also gets the sell test above (cached two minutes), and a B20 token its controls. Tokens outside the index cost one batched RPC request (plus one explorer call when `ETHERSCAN_API_KEY` or `BLOCKSCOUT_API_KEY` is set; Etherscan V2 is tried first), are rate limited per client, and are not written to the database unless the explorer returned a real birth transaction.
 
 ## Deploy on Railway
 
@@ -186,6 +202,7 @@ Not supported: chains that are not bytecode-equivalent (zkSync Era breaks finger
 - **Vyper** keeps immutables after the code, so Vyper templates do not collapse into one skeleton.
 - **The explorer adapters** (`src/explorer.js`: Etherscan V2, Blockscout PRO) are written against the documented `getcontractcreation` response and unit-tested with stubs. Neither has been run against the live APIs. They fail soft: on any surprise the lookup falls back to bytecode evidence.
 - **Verified means provenance, not safety.** A token from a verified factory can still be a bad buy.
+- **The sell test is a quote, not a trade.** It covers Uniswap v4 pools against ETH/WETH only (not v3, v2 or other DEXes, not pools against USDC), a hook can treat the Quoter differently from a real router or change its rules later (a pool is judged as it is at the moment of the lookup), and launchpad tokens are not tested because their pools are the launchpad's own. A pass is not a promise.
 - **Growth:** about 1 KB per token (see "Storage"). Evidence older than the stats window can be pruned without affecting attribution.
 
 ## Layout
@@ -195,6 +212,7 @@ src/chains.js       per-chain numbers and env overrides
 src/rpc.js          paced JSON-RPC client: batching, priority + background lanes, 429 backoff, getLogs ranges that learn a stated cap
 src/fingerprint.js  minimal-proxy detection, opcode skeleton hash
 src/attribution.js  registry loader, event matching, "who announced this token" from a receipt
+src/sellcheck.js    the sell test: a token's v4 pools, a buy and a round-trip quote through the V4Quoter, known trap hooks
 src/births.js       records one birth (shared by indexer and on-demand lookups)
 src/indexer.js      the live loop, plus a background loop (probes, storage, stall-gap replay)
 src/db.js           SQLite schema, compact birth evidence, migration and its rollback, pruning, disk accounting

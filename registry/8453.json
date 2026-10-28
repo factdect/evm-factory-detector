@@ -435,5 +435,13 @@
         }
       ]
     }
+  ],
+  "trapHooks": [
+    {
+      "codeHash": "0x42db5cca66c87d0d48cbb61a0165ab6ddf0bb98b664d6dda94ee5103f273fa89",
+      "name": "B20 sell-trap hook (INVISIBLE template)",
+      "status": "observed",
+      "source": "2026-10-28: INVISIBLE 0xb2000000000000000000006996930ba855ea5774, pool hook 0xbacb63b3aca5e164cfcda95fdc21a7fa4ee240cc kept 99.99% of a 0.000198 ETH sale (tx 0xf5b2aac0\u2026). Same 16,817-byte runtime on 592 hooks, one per B20 token, 2026-10-21..28 (blocks 52,902,920-53,204,710): each token, hook and pool opened by a fresh wallet (nonce 4, PositionManager 0x7c5f5a4b\u2026), fee 0.01%, tick spacing 1."
+    }
   ]
 }

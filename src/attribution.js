@@ -118,7 +118,9 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
   const quoteIssuers = (raw.quoteIssuers ?? []).map((q) => ({ ...q, factory: lc(q.factory), beacon: lc(q.beacon), topic0: lc(q.topic0) }));
   // creation events that carry a platform resolver, with the factory to call (for live lookups of unindexed tokens)
   const platformSpecs = [...byTopic0.values()].flat().filter((s) => s.platform).flatMap((s) => [...s.emitters.keys()].map((factory) => ({ ...s, factory })));
-  return { chainId, launchpads, byTopic0, topic0s: [...byTopic0.keys()], factoryOf, companionOf, quoteIssuers, platformSpecs };
+  // Uniswap v4 hooks known to keep what a sale pays out, by runtime-code keccak (src/sellcheck.js)
+  const trapHooks = new Map((raw.trapHooks ?? []).map((h) => [lc(h.codeHash), { name: h.name, status: h.status ?? 'observed', source: h.source ?? null }]));
+  return { chainId, launchpads, byTopic0, topic0s: [...byTopic0.keys()], factoryOf, companionOf, quoteIssuers, platformSpecs, trapHooks };
 }
 
 function walletRule(w) {
