@@ -129,7 +129,7 @@ test('BirthRecorder.record: a look-alike Bankr launch is stored as Doppler direc
   const rec = new BirthRecorder({ chain, rpc, registry: reg, store, log: { warn() {}, info() {} } });
   const m = matchKnownEvent(reg, createLog());
   const saved = await rec.record(DRS, 98672092, '0xaa9ac19631e69bdf496e04a5289e8940be75ce20f30e5f89cb88e712291b3bd8', 'registry-event', m, {});
-  assert.deepEqual([saved.launchpad_id, saved.confidence, saved.claim_app, JSON.parse(saved.claim_check), saved.tx_from], ['doppler', 'look-alike-platform', 'bankr', { result: 'failed', wallet: 'failed', allocations: 'failed' }, LAUNCHER]);
+  assert.deepEqual([saved.launchpad_id, saved.confidence, saved.claim_app, JSON.parse(saved.claim_check), saved.tx_from], ['doppler', 'look-alike-platform', 'bankr', { result: 'failed', wallet: 'failed', allocations: 'failed', vanity: 'matches' }, LAUNCHER]);
   assert.ok(calls.includes('eth_getCode'), 'the sender\'s code was fetched to check the claim');
   assert.equal(JSON.parse(saved.premint).allocations.length, 2);
 
@@ -172,7 +172,7 @@ test('a genuine Bankr launch (7702 wallet, 15% vesting) stays Bankr: observed-pl
   }) };
   const rec = new BirthRecorder({ chain, rpc, registry: reg, store, log: { warn() {}, info() {} } });
   const saved = await rec.record(QOS, 98744921, '0x' + '0a'.repeat(32), 'registry-event', matchKnownEvent(reg, logs[3]), {});
-  assert.deepEqual([saved.launchpad_id, saved.confidence, JSON.parse(saved.claim_check)], ['bankr', 'observed-emitter', { result: 'verified', wallet: 'verified', allocations: 'verified' }]);
+  assert.deepEqual([saved.launchpad_id, saved.confidence, JSON.parse(saved.claim_check)], ['bankr', 'observed-emitter', { result: 'verified', wallet: 'verified', allocations: 'verified', vanity: 'matches' }]);
   const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
   const b = (await lk.token(4663, QOS)).body;
   assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.status, b.factory.platform.senderCheck], ['observed-platform', 'bankr', 'observed', 'verified']);
@@ -211,18 +211,18 @@ test('older rows: the idle probe and a first lookup read the birth receipt once,
   assert.equal(JSON.parse(store.q.getToken.get(4663, T2).claim_check).result, 'failed');
   assert.equal(await probePendingBirthFacts({ chain, rpc, registry: reg, store, max: 8 }), 0, 'nothing pending');
   // the platform probe (rows without a platform yet) also checks the sender when it is stored
-  const T3 = '0x' + '66'.repeat(20);
+  const T3 = '0x' + '66'.repeat(18) + '0ba3';
   store.saveToken({ chain_id: 4663, address: T3, confidence: 'verified', launchpad_id: 'doppler', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event',
     tx_from: LAUNCHER, premint: JSON.stringify(premintFacts({ logs: drsLogs() }, DRS)), total_supply: SUPPLY });
   const rpc2 = { batch: async (cs) => cs.map((c) => ({ result: c.method === 'eth_call' ? assetData(BANKR) : '0x' })) };
   assert.equal(await probePendingPlatforms({ chain, rpc: rpc2, registry: reg, store }), 1);
-  assert.deepEqual([store.q.getToken.get(4663, T3).launchpad_id, JSON.parse(store.q.getToken.get(4663, T3).claim_check)], ['doppler', { result: 'failed', wallet: 'failed', allocations: 'failed' }]);
+  assert.deepEqual([store.q.getToken.get(4663, T3).launchpad_id, JSON.parse(store.q.getToken.get(4663, T3).claim_check)], ['doppler', { result: 'failed', wallet: 'failed', allocations: 'failed', vanity: 'matches' }]);
   // a row recorded by update-14 from a receipt with no allocations: the sender is stored, premint NULL
   // (update-14 wrote NULL for "nothing minted"; tx_from comes from the same receipt, so it was read)
-  const T4 = '0x' + '67'.repeat(20);
+  const T4 = '0x' + '67'.repeat(18) + '0ba3';
   store.saveToken({ chain_id: 4663, address: T4, confidence: 'verified', launchpad_id: 'doppler', factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', birth_block: 1, birth_tx: '0x2', birth_source: 'registry-event', tx_from: LAUNCHER, total_supply: SUPPLY });
   assert.equal(await probePendingPlatforms({ chain, rpc: rpc2, registry: reg, store }), 1);
-  assert.deepEqual([store.q.getToken.get(4663, T4).launchpad_id, JSON.parse(store.q.getToken.get(4663, T4).claim_check)], ['bankr', { result: 'unverified', wallet: 'failed', allocations: 'verified' }]);
+  assert.deepEqual([store.q.getToken.get(4663, T4).launchpad_id, JSON.parse(store.q.getToken.get(4663, T4).claim_check)], ['bankr', { result: 'unverified', wallet: 'failed', allocations: 'verified', vanity: 'matches' }]);
 });
 
 // update-15: a lookup of a protocol token the index has not reached (born before the index, or in a
@@ -378,15 +378,15 @@ test('boot: stored claims are judged again when the registry changes, from store
   const k = r2.byTopic0.get(CREATE_T0)[0].platform.known.get(BANKR);
   const row = (address, tx_from, premint, claim) => ({ chain_id: 4663, address, factory: AIRLOCK, event_sig: 'Create(address,address,address,address)', platform: BANKR, birth_block: 1, birth_tx: '0x1', birth_source: 'registry-event',
     total_supply: SUPPLY, tx_from, premint, claim_app: 'bankr', claim_check: JSON.stringify(claim), ...(claim.result === 'failed' ? { launchpad_id: 'doppler', confidence: 'look-alike-platform' } : { launchpad_id: 'bankr', confidence: 'observed-emitter' }) });
-  const P = '0x' + '81'.repeat(20), Q = '0x' + '82'.repeat(20), R = '0x' + '83'.repeat(20);
-  store.saveToken(row(P, '0x732971d59ec5ff899c9bf458b99210240b03b115', JSON.stringify(BANKR_15), { result: 'unverified', wallet: 'failed', allocations: 'verified' }));
-  store.saveToken(row(Q, LAUNCHER, JSON.stringify(INSTANT_24), { result: 'failed', wallet: 'failed', allocations: 'failed' }));
-  store.saveToken(row(R, '0xbad608307d46fb8e9d878428ca138542861adfea', JSON.stringify(INSTANT_24), { result: 'verified', wallet: 'verified', allocations: 'failed' })); // judged by update-14's order
+  const P = '0x' + '81'.repeat(18) + '0ba3', Q = '0x' + '82'.repeat(18) + '0ba3', R = '0x' + '83'.repeat(18) + '0ba3'; // Bankr's mined suffix
+  store.saveToken(row(P, '0x732971d59ec5ff899c9bf458b99210240b03b115', JSON.stringify(BANKR_15), { result: 'unverified', wallet: 'failed', allocations: 'verified', vanity: 'matches' }));
+  store.saveToken(row(Q, LAUNCHER, JSON.stringify(INSTANT_24), { result: 'failed', wallet: 'failed', allocations: 'failed', vanity: 'matches' }));
+  store.saveToken(row(R, '0xbad608307d46fb8e9d878428ca138542861adfea', JSON.stringify(INSTANT_24), { result: 'verified', wallet: 'verified', allocations: 'failed', vanity: 'matches' })); // judged by update-14's order
   assert.equal(rejudgeStoredClaims(store, r2, 4663), 1, 'R: an off-policy mint from a 7702 wallet is now a look-alike');
   assert.deepEqual([store.q.getToken.get(4663, R).launchpad_id, JSON.parse(store.q.getToken.get(4663, R).claim_check).result], ['doppler', 'failed']);
   k.wallets.senders.add('0x732971d59ec5ff899c9bf458b99210240b03b115'); // a partner key added to the registry
   assert.equal(rejudgeStoredClaims(store, r2, 4663), 1);
-  assert.deepEqual(JSON.parse(store.q.getToken.get(4663, P).claim_check), { result: 'verified', wallet: 'verified', allocations: 'verified' });
+  assert.deepEqual(JSON.parse(store.q.getToken.get(4663, P).claim_check), { result: 'verified', wallet: 'verified', allocations: 'verified', vanity: 'matches' });
   assert.equal(store.q.getToken.get(4663, Q).confidence, 'look-alike-platform', 'unchanged');
   assert.equal(rejudgeStoredClaims(store, r2, 4663), 0, 'idempotent');
 });

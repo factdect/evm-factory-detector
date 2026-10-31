@@ -1,6 +1,6 @@
 // Records one token birth: enrich (code, metadata, receipt), attribute, persist.
 // Shared by the indexer and by on-demand lookups so both apply the same rules.
-import { birthAllocations, checkAllocations, claimPlacement, claimResult, judgeClaim, matchKnownEvent, pad32, parseClaim, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, storedPremint, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
+import { birthAllocations, checkAllocations, checkVanity, claimPlacement, claimResult, judgeClaim, matchKnownEvent, pad32, parseClaim, platformCall, platformNeedsSender, premintFacts, refsForToken, resolvePlatform, senderCodeCall, storedPremint, TRANSFER_TOPIC, ZERO_TOPIC } from './attribution.js';
 import { enrichToken, fpColumns } from './enrich.js';
 import { fingerprint } from './fingerprint.js';
 
@@ -75,7 +75,7 @@ export class BirthRecorder {
         const calls = [platformCall(match, token)];
         if (sender && platformNeedsSender(match)) calls.push(senderCodeCall(sender));
         const res = await rpc.batch(calls, opts);
-        const r = resolvePlatform(match, res[0]?.result ?? '0x', sender, res[1]?.result ?? null, receipt ? premintFacts(receipt, token) : undefined, meta.total_supply ?? null);
+        const r = resolvePlatform(match, res[0]?.result ?? '0x', sender, res[1]?.result ?? null, receipt ? premintFacts(receipt, token) : undefined, meta.total_supply ?? null, token);
         Object.assign(match, { launchpadId: r.launchpadId, confidence: r.confidence, platformAddr: r.platform, factoryLabel: r.label ?? match.factoryLabel,
           claimedLaunchpadId: r.claimedLaunchpadId, claimCheck: r.claimCheck });
       }
@@ -215,8 +215,9 @@ export function rejudgeStoredClaims(store, registry, chainId) {
           const wallet = !k.wallets ? null : sender && k.wallets.senders.has(sender) ? 'verified'
             : prev?.wallet && prev.wallet !== 'unverified' ? prev.wallet : 'unverified';
           const allocations = checkAllocations(k.allocations, storedPremint(r.premint, r.tx_from), r.total_supply ?? null);
-          const result = claimResult(wallet, allocations);
-          const claim = result === null ? null : { result, wallet, allocations };
+          const vanity = checkVanity(k.vanity, r.address);
+          const result = claimResult(wallet, allocations, vanity);
+          const claim = result === null ? null : { result, wallet, allocations, ...(vanity ? { vanity } : {}) };
           const { launchpadId, confidence } = claimPlacement(k, spec.launchpadId, claim);
           const claimCheck = claim ? JSON.stringify(claim) : null;
           if (claimCheck === (r.claim_check ?? null) && launchpadId === r.launchpad_id && confidence === r.confidence && r.claim_app === k.launchpad) continue;
@@ -252,7 +253,7 @@ export async function probePendingPlatforms({ chain, rpc, registry, store, max =
         store.db.transaction(() => {
           rows.forEach((r, i) => {
             if (res[i]?.error) return; // retry next time
-            const p = resolvePlatform(match, res[i]?.result ?? '0x', r.tx_from ?? null, codeOf.get(i) ?? null, r.premintObj, r.total_supply ?? null);
+            const p = resolvePlatform(match, res[i]?.result ?? '0x', r.tx_from ?? null, codeOf.get(i) ?? null, r.premintObj, r.total_supply ?? null, r.address);
             store.q.setPlatform.run(p.platform, p.launchpadId, p.confidence, p.label ?? entry.label ?? null, p.claimedLaunchpadId ?? null, p.claimCheck ?? null, chain.id, r.address);
           });
         })();
@@ -281,7 +282,7 @@ export async function probePendingBirthFacts({ chain, rpc, registry, store, max 
         const senders = rows.map((r, i) => (rcs[i]?.result?.from ? rcs[i].result.from.toLowerCase() : null));
         const known = rows.map((r) => (r.platform ? spec.platform.known.get(r.platform) : null));
         const need = rows.map((r, i) => [i, senders[i]]).filter(([i, s_]) => s_ && known[i]?.wallets);
-        const judged = (k, i, premint, supply) => judgeClaim(k, senders[i], codeOf.get(i) ?? null, premint, supply);
+        const judged = (k, i, premint, supply) => judgeClaim(k, senders[i], codeOf.get(i) ?? null, premint, supply, rows[i].address);
         const codes = need.length ? await rpc.batch(need.map(([, s_]) => senderCodeCall(s_))) : [];
         const codeOf = new Map(need.map(([i], j) => [i, codes[j]?.result ?? null]));
         store.db.transaction(() => {
@@ -291,7 +292,7 @@ export async function probePendingBirthFacts({ chain, rpc, registry, store, max 
             const premint = premintFacts(receipt, r.address);
             store.q.setBirthFacts.run(senders[i], premint ? JSON.stringify(premint) : '{}', chain.id, r.address);
             const k = known[i];
-            if (k && (k.wallets || k.allocations)) {
+            if (k && (k.wallets || k.allocations || k.vanity)) {
               const claim = judged(k, i, premint, r.total_supply ?? null);
               const { launchpadId, confidence } = claimPlacement(k, spec.launchpadId, claim);
               store.q.setClaim.run(launchpadId, confidence, k.launchpad, claim ? JSON.stringify(claim) : null, chain.id, r.address);

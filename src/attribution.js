@@ -107,7 +107,7 @@ export function loadRegistry(chainId, dir = process.env.REGISTRY_DIR || REGISTRY
         abi: [parseAbiItem(ev.platform.call)], field: ev.platform.field, name: ev.platform.name ?? 'platform',
         // An integrator address is self-declared calldata: anyone can write Bankr's address there.
         // `wallets` says which launch senders the app itself uses; a claim from any other sender is a look-alike.
-        known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), { ...v, wallets: walletRule(v.wallets), allocations: allocationRule(v.allocations) }])),
+        known: new Map(Object.entries(ev.platform.known ?? {}).map(([a, v]) => [lc(a), { ...v, wallets: walletRule(v.wallets), allocations: allocationRule(v.allocations), vanity: vanityRule(v.vanity) }])),
       } : null;
       // a field marked `sale` names the per-token contract the supply is minted into to be sold (a
       // bonding curve, the pool): a mint to it is the launch, not an allocation (see birthAllocations)
@@ -133,6 +133,19 @@ function walletRule(w) {
     senders: new Set((w.senders ?? []).map(lc)),
     eip7702Delegates: new Set((w.eip7702Delegates ?? []).map(lc)),
   };
+}
+
+// An app whose tokens all carry a mined address suffix (Bankr: ...ba3, like Long's ...1e18). A copier can
+// mine the same suffix, so a matching suffix proves nothing; an address WITHOUT it cannot be the app's.
+function vanityRule(v) {
+  if (!v?.suffix) return null;
+  return { status: v.status ?? 'observed', source: v.source ?? null, suffix: String(v.suffix).toLowerCase().replace(/^0x/, '') };
+}
+
+/** 'failed' when the token's address lacks the app's suffix; 'matches' when it has it (not proof); null = no rule or no address. */
+export function checkVanity(rule, token) {
+  if (!rule || !token) return null;
+  return String(token).toLowerCase().endsWith(rule.suffix) ? 'matches' : 'failed';
 }
 
 function allocationRule(a) {
@@ -184,8 +197,9 @@ export function checkAllocations(rule, premint, totalSupply) {
  * unknown) allocation. A sender that is not a known wallet keeps an on-policy claim unverified (the
  * app also launches from partner and CLI keys); with no allocation policy to go by, it refutes it.
  */
-export function claimResult(wallet, allocations) {
-  if (wallet === null && allocations === null) return null;
+export function claimResult(wallet, allocations, vanity = null) {
+  if (vanity === 'failed') return 'failed';
+  if (wallet === null && allocations === null) return vanity === 'matches' ? 'unverified' : null;
   if (allocations === 'failed') return 'failed';
   if (wallet === 'verified') return 'verified';
   if (wallet === 'failed') return allocations === null ? 'failed' : 'unverified';
@@ -206,11 +220,12 @@ export function storedPremint(premintText, txFrom) {
 }
 
 /** The verdict on an integrator claim, from both rules (see claimResult). */
-export function judgeClaim(k, sender, senderCode, premint, totalSupply) {
+export function judgeClaim(k, sender, senderCode, premint, totalSupply, token = null) {
   const wallet = checkSender(k.wallets, sender, senderCode);
   const allocations = checkAllocations(k.allocations, premint, totalSupply);
-  const result = claimResult(wallet, allocations);
-  return result === null ? null : { result, wallet, allocations };
+  const vanity = checkVanity(k.vanity, token);
+  const result = claimResult(wallet, allocations, vanity);
+  return result === null ? null : { result, wallet, allocations, ...(vanity ? { vanity } : {}) };
 }
 
 /** Where a judged claim puts the token: the app, or the protocol when the claim is refuted. */
@@ -312,7 +327,7 @@ export function refsForToken(logs, token) {
  *   known integrator  -> that launchpad, 'verified' if confirmed, 'observed-emitter' if observed
  *   unknown           -> the protocol itself, 'verified' (it IS a protocol launch, app unlisted)
  */
-export function resolvePlatform(match, rawResult, sender = null, senderCode = null, premint = undefined, totalSupply = null) {
+export function resolvePlatform(match, rawResult, sender = null, senderCode = null, premint = undefined, totalSupply = null, token = null) {
   const p = match.platform;
   let addr = null;
   try {
@@ -322,7 +337,7 @@ export function resolvePlatform(match, rawResult, sender = null, senderCode = nu
   } catch { /* unreadable: stays at protocol level */ }
   const k = addr ? p.known.get(addr) : null;
   if (k) {
-    const claim = judgeClaim(k, sender, senderCode, premint, totalSupply);
+    const claim = judgeClaim(k, sender, senderCode, premint, totalSupply, token);
     const claimCheck = claim ? JSON.stringify(claim) : null;
     // The integrator field claims an app, but the launch is not the app's: a direct protocol
     // launch wearing the label. Credited to the protocol, flagged.

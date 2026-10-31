@@ -514,7 +514,7 @@ test('live protocol resolution: an unindexed Doppler token is attributed from ge
   const w = (a) => a.replace('0x', '').padStart(64, '0');
   const asset = (integ) => '0x' + [w('0x0f17206447090e464c277571124dd2688e48aea9'), w('0x0'), w('0x0'), w('0x0'), w('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544'), w('0x0'), w('0x0'), w('0x1'), w('0x1'), w(integ)].join('');
   const BANKR = '0xf60633d02690e2a15a54ab919925f3d038df163e', NOBODY = '0x' + 'ab'.repeat(20);
-  const TOK_B = '0x' + '51'.repeat(20), TOK_X = '0x' + '52'.repeat(20), TOK_N = '0x' + '53'.repeat(20);
+  const TOK_B = '0x' + '51'.repeat(18) + '0ba3', /* a real Bankr token ends in its mined suffix */ TOK_X = '0x' + '52'.repeat(20), TOK_N = '0x' + '53'.repeat(20);
   const clone = '0x363d3d373d3d3d363d733be8b97fd0e713b5abe0649fa830223b6b4bc5995af43d82803e903d91602b57fd5bf3';
   const rpc = {
     batch: async (calls) => calls.map((c) => {

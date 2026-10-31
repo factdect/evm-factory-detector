@@ -66,6 +66,11 @@
                   "noneAllowed": true,
                   "maxAllocations": 1,
                   "tolerancePct": 0.5
+                },
+                "vanity": {
+                  "status": "observed",
+                  "suffix": "ba3",
+                  "source": "On-chain 2026-10-27 (Robinhood: 59 of 59 Bankr-policy launches in 55 h; Base: every sampled launch): Bankr's tokens carry the mined address suffix 'ba3'. A copier can mine it too (18 of the 19 off-policy look-alikes did), so a matching suffix proves nothing; a token without it is not Bankr's."
                 }
               },
               "0xd8a823e4e416df7a8bfa412ae06f5d5639a1db4d": {
@@ -983,7 +988,7 @@
         "string"
       ],
       "beacon": "0xe10b6f6b275de231345c20d14ab812db62151b00",
-      "source": "On-chain 2026-09-22: every '\u2022 Robinhood Token' was created by deploy(bytes32,string,string) on this factory (caller 0x5516b3451d4d6c9f63353fe7bc9537477ecce000) and is a beacon proxy on this beacon. A token counts only if its beacon slot matches: name-alikes (e.g. an 'MCD \u2022 Robinhood Token' on another beacon) are rejected."
+      "source": "On-chain 2026-09-22: every '• Robinhood Token' was created by deploy(bytes32,string,string) on this factory (caller 0x5516b3451d4d6c9f63353fe7bc9537477ecce000) and is a beacon proxy on this beacon. A token counts only if its beacon slot matches: name-alikes (e.g. an 'MCD • Robinhood Token' on another beacon) are rejected."
     }
   ]
 }

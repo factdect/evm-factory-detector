@@ -178,6 +178,11 @@
                   "noneAllowed": true,
                   "maxAllocations": 1,
                   "tolerancePct": 0.5
+                },
+                "vanity": {
+                  "status": "observed",
+                  "suffix": "ba3",
+                  "source": "On-chain 2026-10-27 (Robinhood: 59 of 59 Bankr-policy launches in 55 h; Base: every sampled launch): Bankr's tokens carry the mined address suffix 'ba3'. A copier can mine it too (18 of the 19 off-policy look-alikes did), so a matching suffix proves nothing; a token without it is not Bankr's."
                 }
               }
             }
@@ -219,7 +224,7 @@
       "id": "o1",
       "name": "o1 Launchpad",
       "url": "https://launch.o1.exchange",
-      "stack": "Uniswap v4 pool from launch, permanently locked, 1B supply. On Base the Standard launches are native B20 tokens (created through the B20 precompile 0xB20f\u20260000, so the B20 'creator' of every o1 token is that precompile, not o1). Factories before 2026-08-30 (v1\u2013v4) could mint allocations at birth, unvested or through a vesting vault; the current factories cannot.",
+      "stack": "Uniswap v4 pool from launch, permanently locked, 1B supply. On Base the Standard launches are native B20 tokens (created through the B20 precompile 0xB20f…0000, so the B20 'creator' of every o1 token is that precompile, not o1). Factories before 2026-08-30 (v1–v4) could mint allocations at birth, unvested or through a vesting vault; the current factories cannot.",
       "events": [
         {
           "topic0": "0x207384e895174175cc774fe7f7457b37c382f27ebf53d37d5257b862f80eaf9c",
@@ -441,7 +446,7 @@
       "codeHash": "0x42db5cca66c87d0d48cbb61a0165ab6ddf0bb98b664d6dda94ee5103f273fa89",
       "name": "B20 sell-trap hook (INVISIBLE template)",
       "status": "observed",
-      "source": "2026-10-28: INVISIBLE 0xb2000000000000000000006996930ba855ea5774, pool hook 0xbacb63b3aca5e164cfcda95fdc21a7fa4ee240cc kept 99.99% of a 0.000198 ETH sale (tx 0xf5b2aac0\u2026). Same 16,817-byte runtime on 592 hooks, one per B20 token, 2026-10-21..28 (blocks 52,902,920-53,204,710): each token, hook and pool opened by a fresh wallet (nonce 4, PositionManager 0x7c5f5a4b\u2026), fee 0.01%, tick spacing 1."
+      "source": "2026-10-28: INVISIBLE 0xb2000000000000000000006996930ba855ea5774, pool hook 0xbacb63b3aca5e164cfcda95fdc21a7fa4ee240cc kept 99.99% of a 0.000198 ETH sale (tx 0xf5b2aac0…). Same 16,817-byte runtime on 592 hooks, one per B20 token, 2026-10-21..28 (blocks 52,902,920-53,204,710): each token, hook and pool opened by a fresh wallet (nonce 4, PositionManager 0x7c5f5a4b…), fee 0.01%, tick spacing 1."
     }
   ]
 }

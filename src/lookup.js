@@ -279,7 +279,7 @@ export class Lookup {
         const [res] = await rpc.batch([platformCall(match, addr)], { priority: true });
         const data = res?.result ?? '0x';
         if (data.length < 66) continue;
-        const r = resolvePlatform(match, data);
+        const r = resolvePlatform(match, data, null, null, undefined, null, addr);
         if (r.platform === 'unreadable') continue;
         // numeraire (word 0) all-zero means the protocol has no record of this asset
         if (/^0x0{64}/.test(data.slice(0, 66).replace('0x', '0x'))) continue;
@@ -401,9 +401,9 @@ export class Lookup {
       // a protocol launch that claims an app with rules: judge the claim now (sender wallet + allocation policy)
       const spec = row.platform && row.factory ? (reg.platformSpecs ?? []).find((s) => s.factory === row.factory) : null;
       const known = spec?.platform.known.get(row.platform);
-      if (spec && known && (known.wallets || known.allocations) && parseClaim(row.claim_check)?.result !== 'verified') {
+      if (spec && known && (known.wallets || known.allocations || known.vanity) && parseClaim(row.claim_check)?.result !== 'verified') {
         const code = sender && known.wallets ? (await rpc.batch([senderCodeCall(sender)], { priority: true }))[0]?.result ?? null : null;
-        const claim = judgeClaim(known, sender, code, premint, row.total_supply ?? null);
+        const claim = judgeClaim(known, sender, code, premint, row.total_supply ?? null, row.address);
         const { launchpadId, confidence } = claimPlacement(known, spec.launchpadId, claim);
         const claimCheck = claim ? JSON.stringify(claim) : null;
         this.store.q.setClaim.run(launchpadId, confidence, known.launchpad, claimCheck, chain.id, row.address);
@@ -591,6 +591,7 @@ export class Lookup {
     }
     if (code === 'look-alike-platform' && claimed) {
       const why = [];
+      if (claim?.vanity === 'failed') why.push(`the token's address does not end in ${claimed.name}'s address suffix (every ${claimed.name} launch observed on this chain does)`);
       if (claim?.allocations === 'failed') why.push(`what was minted at birth${premint?.unlockedPct ? ` (${premint.unlockedPct}% unlocked at launch)` : ''} is not something ${claimed.name}'s launch flow produces`);
       if (claim?.wallet === 'failed') why.push(`the launch was sent by ${row.tx_from ?? 'a wallet'}, which is not one of ${claimed.name}'s wallets`);
       else if (claim?.wallet === 'verified') why.push(`the sending wallet is set up like ${claimed.name}'s (an EIP-7702 delegation anyone can copy), which does not make an off-policy mint ${claimed.name}'s`);
