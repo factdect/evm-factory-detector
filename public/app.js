@@ -69,7 +69,7 @@
       if (d.factory.platform?.integrator) {
         const p = d.factory.platform;
         if (p.status === 'unlisted') bits.push(`launched by unlisted app ${short(p.integrator)}`);
-        else if (p.status === 'look-alike') bits.push(`integrator field names ${p.claims?.name ?? short(p.integrator)}${p.allocationCheck === 'failed' ? ', with an allocation its launch flow does not produce' : ''}${p.senderCheck === 'failed' ? `, sent by ${p.sender ? short(p.sender) : 'a wallet'} that is not one of its wallets` : ''}`);
+        else if (p.status === 'look-alike') bits.push(`integrator field names ${p.claims?.name ?? short(p.integrator)}${p.allocationCheck === 'failed' ? ', with an allocation its launch flow does not produce' : ''}${p.senderCheck === 'failed' ? `, sent by ${p.sender ? short(p.sender) : 'a wallet'} that is not one of its wallets` : ''}${p.vanityCheck === 'failed' ? ', and its address lacks the suffix every one of its tokens carries' : ''}`);
         else bits.push(`app ${short(p.integrator)}${p.senderCheck === 'verified' ? `, launch sent by a ${p.claims?.name ?? 'known'} wallet`
           : p.senderCheck === 'failed' ? `, launch sender not a known ${p.claims?.name ?? 'app'} wallet${p.allocationCheck === 'verified' ? ' (allocation within its policy, label kept)' : ''}`
           : p.claimCheck === 'unverified' ? (p.allocationCheck === 'verified' ? `, allocation within ${p.claims?.name ?? 'its'}'s policy, not confirmed` : ', not checked') : ''}`);

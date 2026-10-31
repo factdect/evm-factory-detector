@@ -131,6 +131,7 @@ test('BirthRecorder.record: a look-alike Bankr launch is stored as Doppler direc
   const saved = await rec.record(DRS, 98672092, '0xaa9ac19631e69bdf496e04a5289e8940be75ce20f30e5f89cb88e712291b3bd8', 'registry-event', m, {});
   assert.deepEqual([saved.launchpad_id, saved.confidence, saved.claim_app, JSON.parse(saved.claim_check), saved.tx_from], ['doppler', 'look-alike-platform', 'bankr', { result: 'failed', wallet: 'failed', allocations: 'failed', vanity: 'matches' }, LAUNCHER]);
   assert.ok(calls.includes('eth_getCode'), 'the sender\'s code was fetched to check the claim');
+  assert.equal(saved.claim_check && JSON.parse(saved.claim_check).vanity, 'matches', 'DRS copied the ba3 suffix: it matches, which proves nothing');
   assert.equal(JSON.parse(saved.premint).allocations.length, 2);
 
   const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
@@ -175,10 +176,37 @@ test('a genuine Bankr launch (7702 wallet, 15% vesting) stays Bankr: observed-pl
   assert.deepEqual([saved.launchpad_id, saved.confidence, JSON.parse(saved.claim_check)], ['bankr', 'observed-emitter', { result: 'verified', wallet: 'verified', allocations: 'verified', vanity: 'matches' }]);
   const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
   const b = (await lk.token(4663, QOS)).body;
-  assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.status, b.factory.platform.senderCheck], ['observed-platform', 'bankr', 'observed', 'verified']);
+  assert.deepEqual([b.verdict.code, b.launchpad.id, b.factory.platform.status, b.factory.platform.senderCheck, b.factory.platform.vanityCheck], ['observed-platform', 'bankr', 'observed', 'verified', 'matches']);
   assert.equal(b.premint.totalPct, 15);
   assert.equal(b.premint.unlockedPct, 0);
   assert.deepEqual(b.verdict.warnings, ['15% of the supply was minted outside the sale (vesting; see premint).']);
+});
+
+test('the same on-policy launch at an address WITHOUT ba3 is not Bankr: look-alike, vanityCheck failed, warning names the missing suffix', async () => {
+  const store = openDb(':memory:');
+  const chain = chainOf();
+  const SENDER = '0xbad608307d46fb8e9d878428ca138542861adfea', RECIP = '0x812140e97180357f73b4888df29d2c8759617890', QOS = '0xdc28bd4f8e4500ca79371f56461657ce6b905b00';
+  const logs = [
+    { address: QOS, topics: [T_SCHED, '0x' + w('0x0')], data: '0x' + w('0x278d00') + w('0x1e13380') },
+    { address: QOS, topics: [T_ALLOC, pad32(RECIP), '0x' + w('0x0')], data: '0x' + w('0x3077b58d5d378399ac000000') }, // 15B
+    { address: QOS, topics: [XFER, '0x' + '0'.repeat(64), pad32(QOS)], data: '0x' + w('0x3077b58d5d378399ac000000') },
+    { address: AIRLOCK, logIndex: '0x15', topics: [CREATE_T0, pad32('0x0bd7d308f8e1639fab988df18a8011f41eacad73')], data: '0x' + w(QOS) + w('0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544') + w('0x' + '77'.repeat(20)) },
+  ];
+  const receipt = { from: SENDER, to: AIRLOCK, logs };
+  const rpc = { batch: async (cs) => cs.map((c) => {
+    if (c.method === 'eth_getCode') return { result: c.params[0] === QOS ? '0x3d3d3d3d363d3d37363d733be8b97fd0e713b5abe0649fa830223b6b4bc5995af43d3d93803e602a57fd5bf3' : c.params[0] === SENDER ? code7702(BANKR_7702) : '0x' };
+    if (c.method === 'eth_getTransactionReceipt') return { result: receipt };
+    if (c.method === 'eth_call' && c.params[0].to === AIRLOCK) return { result: assetData(BANKR).replace(w(DRS), w(QOS)) };
+    if (c.method === 'eth_call') return metaOf(c);
+    return { result: '0x' };
+  }) };
+  const rec = new BirthRecorder({ chain, rpc, registry: reg, store, log: { warn() {}, info() {} } });
+  const saved = await rec.record(QOS, 98744921, '0x' + '0a'.repeat(32), 'registry-event', matchKnownEvent(reg, logs[3]), {});
+  assert.deepEqual([saved.launchpad_id, saved.confidence, JSON.parse(saved.claim_check).vanity], ['doppler', 'look-alike-platform', 'failed']);
+  const lk = new Lookup({ chains: new Map([[4663, chain]]), rpcs: new Map([[4663, rpc]]), registries: new Map([[4663, reg]]), store });
+  const b = (await lk.token(4663, QOS)).body;
+  assert.deepEqual([b.verdict.code, b.factory.platform.status, b.factory.platform.claimCheck, b.factory.platform.vanityCheck, b.factory.platform.allocationCheck], ['look-alike-platform', 'look-alike', 'failed', 'failed', 'verified']);
+  assert.match(b.verdict.warnings.join(' '), /address does not end in Bankr's address suffix/);
 });
 
 test('older rows: the idle probe and a first lookup read the birth receipt once, store sender + pre-mint, and re-judge the claim', async () => {

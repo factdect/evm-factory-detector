@@ -660,7 +660,7 @@ export class Lookup {
           status: code === 'protocol-verified' ? 'unlisted' : code === 'look-alike-platform' ? 'look-alike' : code === 'observed-platform' ? 'observed' : 'confirmed',
           // the app the integrator field names, and whether the launch sender belongs to it
           claims: claimed ? { id: claimed.id, name: claimed.name } : null,
-          claimCheck: claim?.result ?? null, senderCheck: claim?.wallet ?? null, allocationCheck: claim?.allocations ?? null, sender: row.tx_from ?? null,
+          claimCheck: claim?.result ?? null, senderCheck: claim?.wallet ?? null, allocationCheck: claim?.allocations ?? null, vanityCheck: claim?.vanity ?? null, sender: row.tx_from ?? null,
         } : null,
         // silent factories announce nothing: report what they made instead
         silent: Boolean(silentMaker),
